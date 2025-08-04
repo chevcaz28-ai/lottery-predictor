@@ -12,7 +12,6 @@ creds_json = os.environ.get("GOOGLE_CREDS_JSON")
 with open("credentials.json", "w") as f:
     f.write(creds_json)
 
-# Config
 SHEET_NAME = "Lottery Predictor New August 25"
 OPENAI_KEY = os.environ.get("OPENAI_KEY")
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
@@ -27,7 +26,6 @@ games_config = {
 LAST_DRAWS = 10
 FREQ_WINDOW = 50
 
-# Authenticate Google Sheets
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
 client = gspread.authorize(creds)
@@ -120,6 +118,34 @@ def fetch_and_update_results():
 
     return updated_games
 
+def evaluate_predictions():
+    tracker = client.open(SHEET_NAME).worksheet("Prediction_Tracker")
+    data = tracker.get_all_values()
+    headers, rows = data[0], data[1:]
+
+    for i, row in enumerate(rows, start=2):
+        game = row[1]
+        prediction_str = row[3]
+        status = row[11]
+
+        if status == "Evaluated":
+            continue
+
+        prediction_nums = [x for x in prediction_str.split("-") if x.strip() and not x.startswith("PB:")]
+        prediction_nums = list(map(int, prediction_nums))
+
+        game_history = get_game_history(game)
+        if game_history.empty:
+            continue
+
+        last_draw = game_history.iloc[-1].dropna().astype(int).tolist()
+        matches = len(set(prediction_nums) & set(last_draw))
+
+        tracker.update_cell(i, 10, matches)  # Matches
+        tracker.update_cell(i, 11, i-1)      # Match Count
+        tracker.update_cell(i, 9, 1 if matches == len(prediction_nums) else 0)  # Win Count
+        tracker.update_cell(i, 12, "Evaluated")
+
 if __name__ == "__main__":
     updated_games = fetch_and_update_results()
 
@@ -196,7 +222,7 @@ if __name__ == "__main__":
         if predictions_gpt:
             push_to_tracker(predictions_gpt, "GPT-Hybrid", "GPT Hybrid", game_histories)
 
+        evaluate_predictions()  # ✅ Updates Win Count, Matches, Match Count
         log_run(updated_games, gpt_used)
 
     print("✅ Script executed successfully.")
-
