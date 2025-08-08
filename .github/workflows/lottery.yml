@@ -1,0 +1,23 @@
+name: Lottery Automation
+
+on:
+  schedule:
+    - cron: "0 8 * * *"  # Runs daily at 8 AM UTC
+  workflow_dispatch:
+
+jobs:
+  run-lottery:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
+    - name: Install dependencies
+      run: pip install -r requirements.txt
+    - name: Run script
+      env:
+        GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
+        RAPID_API_KEY: ${{ secrets.RAPID_API_KEY }}
+      run: python main.py
