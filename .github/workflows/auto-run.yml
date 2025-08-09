@@ -1,9 +1,9 @@
-name: Lottery Predictor Auto Run
+name: Run Lottery Predictor
 
 on:
   schedule:
-    - cron: "30 4 * * *"  # 04:30 UTC ≈ 11:30 PM US Central
-  workflow_dispatch:
+    - cron: "30 4 * * *"  # Runs every day at 04:30 UTC (11:30 PM CST)
+  workflow_dispatch:  # Allows manual trigger from GitHub Actions tab
 
 jobs:
   run:
@@ -23,18 +23,8 @@ jobs:
           pip install gspread google-auth pandas numpy requests scikit-learn
 
       - name: Run script
-      env:
-        GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
-        RAPID_API_KEY: ${{ secrets.RAPID_API_KEY }}
-        run: python main.py
-          python - << 'PY'
-import os, sys, traceback
-print("RAPID_API_KEY present:", bool(os.getenv("RAPID_API_KEY")))
-print("GOOGLE_CREDS_JSON length:", len(os.getenv("GOOGLE_CREDS_JSON","")))
-try:
-    import main
-    print("✅ main.py executed")
-except Exception as e:
-    traceback.print_exc()
-    sys.exit(1)
-PY
+        env:
+          GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
+          RAPID_API_KEY:      ${{ secrets.RAPID_API_KEY }}
+        run: |
+          python main.py
