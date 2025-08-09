@@ -22,11 +22,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install gspread google-auth pandas numpy requests scikit-learn
 
-      - name: Run
-        env:
-          GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
-          RAPID_API_KEY:      ${{ secrets.RAPID_API_KEY }}
-        run: |
+      - name: Run script
+      env:
+        GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
+        RAPID_API_KEY: ${{ secrets.RAPID_API_KEY }}
+        run: python main.py
           python - << 'PY'
 import os, sys, traceback
 print("RAPID_API_KEY present:", bool(os.getenv("RAPID_API_KEY")))
