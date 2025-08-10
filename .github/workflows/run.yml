@@ -2,8 +2,8 @@ name: Run Lottery Predictor
 
 on:
   schedule:
-    - cron: "30 4 * * *"  # Runs every day at 04:30 UTC (11:30 PM US Central)
-  workflow_dispatch:  # Allows manual trigger
+    - cron: "30 4 * * *"  # Runs every day at 04:30 UTC (11:30 PM CST)
+  workflow_dispatch:  # Allows manual trigger from GitHub Actions tab
 
 jobs:
   run:
