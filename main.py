@@ -1,19 +1,24 @@
-#!/usr/bin/env python3
 """
-main.py — v4 + LLM method
-- Same as v4 (merge/append results, evaluate past predictions, write new predictions only when new results arrive)
-- Adds an optional ChatGPT/LLM method ("llm_gpt") that proposes a full number set per game.
-- LLM is OFF by default; enable with:
-    - Set OPENAI_API_KEY secret (GitHub Actions → Secrets)
-    - Set ENABLE_LLM_METHOD=1 (env)
-    - Optional: OPENAI_MODEL (defaults to "gpt-4o-mini")
+main.py — v4.2 (per‑game totals)
+- Same as v4.1 (merge/append results, score when new results arrive, predict only on new results)
+- Adds per‑game totals for how many predictions to emit each run.
+- No cap on variants per method; adaptive weights decide how extra slots are distributed.
+- LLM method (llm_gpt) still makes only ONE API call per run; any extra variants
+  for llm_gpt come from mutating its base pick (so no added token cost).
 
-Environment variables used:
+Env (set in GitHub Actions step):
 - RAPID_API_KEY, GOOGLE_CREDS_JSON, optional SHEET_NAME
-- ENABLE_PREDICTIONS=1       # default on
-- ENABLE_LLM_METHOD=0/1      # default off
-- OPENAI_API_KEY             # required if ENABLE_LLM_METHOD=1
-- OPENAI_MODEL               # optional; default "gpt-4o-mini"
+- ENABLE_PREDICTIONS=1
+- Global default (optional): PREDICTIONS_PER_GAME
+- Per-game overrides (strings with integers):
+    PREDICTIONS_POWERBALL
+    PREDICTIONS_MEGABUCKS
+    PREDICTIONS_SUPERCASH
+    PREDICTIONS_BADGER5
+- Optional LLM method:
+    ENABLE_LLM_METHOD=0/1
+    OPENAI_API_KEY
+    OPENAI_MODEL (default "gpt-4o-mini")
 """
 
 import os, json, datetime as dt, re, random
@@ -24,7 +29,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError
 
-# ---------------- Base config ----------------
+# ---- Config ----
 DEFAULT_SHEET_NAME = "Lottery Predictor New August 25"
 API_URL_WI = "https://lottery-results.p.rapidapi.com/games-by-state/us/wi"
 API_HOST = "lottery-results.p.rapidapi.com"
@@ -36,10 +41,9 @@ RESULT_SCHEMAS = {
     "SuperCash_Results": ["Date","N1","N2","N3","N4","N5","N6","Doubler"],
     "Badger5_Results":   ["Date","N1","N2","N3","N4","N5"],
 }
-
 TRACKER_COLS = ["Timestamp","Game","Prediction","Method","Win Count","Matches","Match Count"]
 
-# ---------------- Utilities ----------------
+# ---- Utilities ----
 def fail(msg:str): raise RuntimeError(msg)
 
 def load_runtime_config():
@@ -186,7 +190,7 @@ def merge_by_date(existing: List[List[Any]], new_rows: List[List[Any]], date_idx
     rows.sort(key=lambda r: str(r[date_idx]), reverse=True)
     return rows
 
-# ---------- Build game rows ----------
+# ---- Build rows per game ----
 def pb_rows_from_draws(draws: List[Dict[str,Any]]) -> List[List[Any]]:
     out=[]
     for d in draws:
@@ -227,13 +231,24 @@ def b5_rows_from_draws(draws: List[Dict[str,Any]]) -> List[List[Any]]:
     out.sort(key=lambda r: (r[0] or ""), reverse=True)
     return out
 
-# ---------- Non-LLM methods ----------
+# ---- Methods (non‑LLM) ----
 def unique_combo(nums: List[int], need:int, lo:int, hi:int) -> List[int]:
     s = sorted(set(n for n in nums if isinstance(n,int) and lo<=n<=hi))
     while len(s) < need:
         x = random.randint(lo, hi)
         if x not in s: s.append(x)
     return sorted(s)[:need]
+
+def mutate(nums: List[int], lo:int, hi:int) -> List[int]:
+    s = list(sorted(set(int(x) for x in nums if str(x).isdigit())))
+    if not s: return s
+    for _ in range(50):
+        idx = random.randrange(0, len(s))
+        cand = random.randint(lo, hi)
+        if cand not in s:
+            s[idx] = cand
+            break
+    return sorted(s)
 
 def freq_method(rows: List[List[Any]], need:int, lo:int, hi:int, window:int=50) -> List[int]:
     hist = {}
@@ -324,7 +339,7 @@ def parse_prediction_to_nums(game:str, pred_str:str) -> Tuple[List[int], Optiona
         if tok.isdigit(): mains.append(int(tok))
     return mains, special
 
-# ---------- Run_Log helpers ----------
+# ---- Run_Log ----
 def read_runlog(ss):
     ws = get_or_create_worksheet(ss, "Run_Log", rows=100, cols=4)
     vals = ws.get_all_values()
@@ -351,9 +366,9 @@ def write_runlog(ss, db):
         rows.append([gm, info.get("LastResultDate",""), info.get("LastPredictedNextDraw","")])
     ws.update(values=rows, range_name="A1")
 
-# ---------- Evaluate past predictions ----------
+# ---- Evaluate pending predictions ----
 def evaluate_pending_predictions(ss, game:str, latest_row: List[Any]):
-    ws = get_or_create_worksheet(ss, "Prediction_Tracker", rows=5000, cols=len(TRACKER_COLS))
+    ws = get_or_create_worksheet(ss, "Prediction_Tracker", rows=20000, cols=len(TRACKER_COLS))
     try: ws.update(values=[TRACKER_COLS], range_name="A1")
     except APIError: pass
 
@@ -402,9 +417,9 @@ def evaluate_pending_predictions(ss, game:str, latest_row: List[Any]):
         end_col = col_letter(len(TRACKER_COLS))
         ws.update(values=mod_rows, range_name=f"A2:{end_col}{len(mod_rows)+1}")
 
-# ---------- Adaptive weights ----------
+# ---- Adaptive weights ----
 def adaptive_weights(ss, game:str) -> Dict[str,float]:
-    ws = get_or_create_worksheet(ss, "Prediction_Tracker", rows=5000, cols=len(TRACKER_COLS))
+    ws = get_or_create_worksheet(ss, "Prediction_Tracker", rows=20000, cols=len(TRACKER_COLS))
     recs = ws.get_all_records()
     stats = {}
     for r in recs:
@@ -429,13 +444,8 @@ def adaptive_weights(ss, game:str) -> Dict[str,float]:
         return {k:1.0/len(weights) for k in weights}
     return {k:v/total for k,v in weights.items()}
 
-# ---------- LLM method ----------
+# ---- LLM method (optional) ----
 def llm_pick_numbers(game:str, rows_hist: List[List[Any]]) -> Tuple[List[int], Optional[int]]:
-    """
-    Calls OpenAI to propose a full number set. Returns (mains, special) where special is only for Powerball.
-    Expects OPENAI_API_KEY; model defaults to "gpt-4o-mini".
-    If the API isn't available, returns empty list so caller can skip.
-    """
     if os.getenv("ENABLE_LLM_METHOD","0") not in ("1","true","True","YES","yes"):
         return [], None
     api_key = os.getenv("OPENAI_API_KEY","").strip()
@@ -443,9 +453,8 @@ def llm_pick_numbers(game:str, rows_hist: List[List[Any]]) -> Tuple[List[int], O
         return [], None
 
     model = os.getenv("OPENAI_MODEL","gpt-4o-mini")
-    # Pack a compact history summary for the prompt
     hist_lines = []
-    for r in rows_hist[:100]:  # keep prompt small
+    for r in rows_hist[:100]:
         date = str(r[0])
         if game=="Powerball":
             nums = [r[1],r[2],r[3],r[4],r[5]]; pb = r[6]
@@ -484,11 +493,9 @@ def llm_pick_numbers(game:str, rows_hist: List[List[Any]]) -> Tuple[List[int], O
         "Respond ONLY with JSON: {\"mains\":[int,...],\"special\":null or int}"
     )
 
-    # Support both OpenAI Python SDK v1 and legacy
     mains, special = [], None
     try:
         try:
-            # New SDK style
             from openai import OpenAI
             client = OpenAI(api_key=api_key)
             resp = client.chat.completions.create(
@@ -501,7 +508,6 @@ def llm_pick_numbers(game:str, rows_hist: List[List[Any]]) -> Tuple[List[int], O
             )
             content = resp.choices[0].message.content.strip()
         except Exception:
-            # Legacy style fallback
             import openai
             openai.api_key = api_key
             resp = openai.ChatCompletion.create(
@@ -514,17 +520,13 @@ def llm_pick_numbers(game:str, rows_hist: List[List[Any]]) -> Tuple[List[int], O
             )
             content = resp["choices"][0]["message"]["content"].strip()
 
-        # Extract JSON
-        import json as _json
-        js = _json.loads(content)
+        js = json.loads(content)
         mains = [int(x) for x in js.get("mains",[]) if isinstance(x,(int,str)) and str(x).isdigit()]
         sp = js.get("special", None)
         special = int(sp) if (sp is not None and str(sp).isdigit()) else None
     except Exception:
-        # If the LLM call fails for any reason, quietly skip
         return [], None
 
-    # Validate ranges
     def clip_and_unique(nums, need, lo, hi):
         s = []
         for x in nums:
@@ -533,7 +535,6 @@ def llm_pick_numbers(game:str, rows_hist: List[List[Any]]) -> Tuple[List[int], O
                 if lo<=xi<=hi and xi not in s:
                     s.append(xi)
             except: pass
-        # top up randomly if not enough
         while len(s) < need:
             xi = random.randint(lo, hi)
             if xi not in s:
@@ -545,28 +546,43 @@ def llm_pick_numbers(game:str, rows_hist: List[List[Any]]) -> Tuple[List[int], O
         if special is None or not (1<=special<=26):
             special = random.randint(1,26)
     elif game=="Megabucks":
-        mains = clip_and_unique(mains, 6, 1, 49)
-        special = None
+        mains = clip_and_unique(mains, 6, 1, 49); special = None
     elif game=="Super Cash":
-        mains = clip_and_unique(mains, 6, 1, 39)
-        special = None
+        mains = clip_and_unique(mains, 6, 1, 39); special = None
     elif game=="Badger 5":
-        mains = clip_and_unique(mains, 5, 1, 31)
-        special = None
+        mains = clip_and_unique(mains, 5, 1, 31); special = None
 
     return mains, special
 
-# ---------- Write new predictions ----------
+# ---- Per‑game totals ----
+def target_total_for_game(game:str, enabled_method_count:int) -> int:
+    mapping = {
+        "Powerball":  os.getenv("PREDICTIONS_POWERBALL"),
+        "Megabucks":  os.getenv("PREDICTIONS_MEGABUCKS"),
+        "Super Cash": os.getenv("PREDICTIONS_SUPERCASH"),
+        "Badger 5":   os.getenv("PREDICTIONS_BADGER5"),
+    }
+    specific = mapping.get(game)
+    if specific and str(specific).strip().isdigit():
+        return max(int(str(specific).strip()), enabled_method_count)
+    # fallback to global
+    global_default = os.getenv("PREDICTIONS_PER_GAME")
+    if global_default and str(global_default).strip().isdigit():
+        return max(int(str(global_default).strip()), enabled_method_count)
+    # ultimate fallback: one per method
+    return enabled_method_count
+
+# ---- Write predictions ----
 def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_draw_date:str):
     if os.getenv("ENABLE_PREDICTIONS","1") not in ("1","true","True","YES","yes"):
         return
-    ws = get_or_create_worksheet(ss, "Prediction_Tracker", rows=10000, cols=len(TRACKER_COLS))
+    ws = get_or_create_worksheet(ss, "Prediction_Tracker", rows=20000, cols=len(TRACKER_COLS))
     try: ws.update(values=[TRACKER_COLS], range_name="A1")
     except APIError: pass
 
     existing = ws.get_all_records()
     today = dt.datetime.utcnow().strftime("%Y-%m-%d")
-    existing_keys = {(str(r.get("Timestamp",""))[:10], r.get("Game","").strip(), r.get("Method","").strip()) for r in existing}
+    existing_keys = {(str(r.get("Timestamp",""))[:10], r.get("Game","").strip(), r.get("Method","").strip(), r.get("Prediction","").strip()) for r in existing}
 
     def append_rows(new_rows: List[List[str]]):
         if not new_rows: return
@@ -575,6 +591,7 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
         end_col = col_letter(len(TRACKER_COLS))
         ws.update(values=new_rows, range_name=f"A{start_row}:{end_col}{end_row}")
 
+    # Game ranges
     if game=="Powerball":
         need, lo, hi = 5, 1, 69
     elif game=="Megabucks":
@@ -586,35 +603,83 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
     else:
         return
 
-    # Non-LLM methods
+    # One base pick per method
     methods: Dict[str, Tuple[List[int], Optional[int]]] = {}
     methods["last_draw_baseline"] = (rows_hist[0][1:1+need] if rows_hist else [], None)
     methods["freq50"] = (freq_method(rows_hist, need, lo, hi, window=50), None)
     methods["recency"] = (recency_method(rows_hist, need, lo, hi, decay=0.92), None)
     methods["markov1"] = (markov1_method(rows_hist, need, lo, hi), None)
 
-    # Powerball special ball selection
+    # Powerball PB for non-LLM
     special_pb = pick_powerball(rows_hist) if game=="Powerball" else None
 
-    # LLM method (optional)
+    # Optional LLM
     mains_llm, special_llm = llm_pick_numbers(game, rows_hist)
     if mains_llm:
         methods["llm_gpt"] = (mains_llm, special_llm if game=="Powerball" else None)
 
+    enabled_methods = list(methods.keys())
+    total_target = target_total_for_game(game, len(enabled_methods))
+
     timestamp = dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    written_preds = set()  # avoid duplicate prediction strings within this batch
     to_write = []
-    for md, (nums, sp) in methods.items():
-        key = (today, game, md)
-        if key in existing_keys:
-            continue
-        # Use PB choice for non-LLM methods when game is Powerball
-        special = sp if md=="llm_gpt" else (special_pb if game=="Powerball" else None)
+
+    def emit(md:str, nums:List[int], sp:Optional[int]):
+        special = sp if (md=="llm_gpt" and sp is not None) else (special_pb if game=="Powerball" else None)
         pred_str = fmt_prediction_str(game, list(map(int, nums)) if nums else [], special)
+        key = (today, game, md, pred_str)
+        if key in existing_keys or pred_str in written_preds:
+            return False
         to_write.append([timestamp, game, pred_str, md, "0", "", ""])
+        written_preds.add(pred_str)
+        return True
+
+    # Pass 1: one per method
+    for md in enabled_methods:
+        nums, sp = methods[md]
+        emit(md, nums, sp)
+
+    # Pass 2: extra variants allocated by adaptive weights (no cap per method; includes llm_gpt)
+    extra = max(0, total_target - len(to_write))
+    if extra > 0:
+        weights = adaptive_weights(ss, game)
+        # If no history yet, uniform
+        if not weights:
+            weights = {m: 1.0/len(enabled_methods) for m in enabled_methods}
+        else:
+            # Normalize to enabled methods only
+            total_w = sum(weights.get(m,0.0) for m in enabled_methods)
+            if total_w <= 0:
+                weights = {m: 1.0/len(enabled_methods) for m in enabled_methods}
+            else:
+                weights = {m: weights.get(m,0.0)/total_w for m in enabled_methods}
+
+        def weighted_pick(w:Dict[str,float])->str:
+            r = random.random(); cum=0.0
+            for k,v in w.items():
+                cum += v
+                if r <= cum: return k
+            return next(iter(w))
+
+        base_cache = {md: list(methods[md][0]) for md in enabled_methods}
+        base_sp    = {md: (methods[md][1] if md=="llm_gpt" else None) for md in enabled_methods}
+
+        tries = 0
+        while extra > 0 and tries < 400:
+            tries += 1
+            md = weighted_pick(weights)
+            base_nums = base_cache.get(md, [])
+            if not base_nums:
+                continue
+            variant = mutate(base_nums, lo, hi)
+            sp = base_sp.get(md, None)
+            if emit(md, variant, sp):
+                extra -= 1
 
     append_rows(to_write)
 
-# ---------- Main orchestrator ----------
+# ---- Main ----
 def main():
     sheet_name, rapid_key, client, sa_email = load_runtime_config()
     ss = open_sheet(client, sheet_name)
@@ -626,7 +691,6 @@ def main():
 
     data = fetch_wi_results(rapid_key)
     write_raw(ws_raw, data)
-
     games = top_level_games(data)
 
     def find_game(needle:str)->Optional[Dict[str,Any]]:
@@ -647,21 +711,18 @@ def main():
         next_draw = normalize_date(draws[0].get("nextDrawDate")) if draws else ""
         return merged, next_draw
 
-    # Merge/write each game
-    merged_pb, next_pb   = merge_and_write("Powerball",   "Powerball_Results", 5, pb_rows_from_draws)
-    merged_mg, next_mg   = merge_and_write("Megabucks",   "Megabucks_Results", 6, mg_rows_from_draws)
-    merged_sc, next_sc   = merge_and_write("Super Cash",  "SuperCash_Results", 6, sc_rows_from_draws)
-    merged_b5, next_b5   = merge_and_write("Badger 5",    "Badger5_Results",   5, b5_rows_from_draws)
+    merged_pb, next_pb = merge_and_write("Powerball",  "Powerball_Results", 5, pb_rows_from_draws)
+    merged_mg, next_mg = merge_and_write("Megabucks",  "Megabucks_Results", 6, mg_rows_from_draws)
+    merged_sc, next_sc = merge_and_write("Super Cash", "SuperCash_Results", 6, sc_rows_from_draws)
+    merged_b5, next_b5 = merge_and_write("Badger 5",   "Badger5_Results",   5, b5_rows_from_draws)
 
-    # Index
-    idx_rows = []
-    for i, g in enumerate(games):
-        idx_rows.append([i+1, str(g.get("code","")), str(g.get("name",""))])
+    # Index for visibility
+    idx_rows = [[i+1, str(g.get("code","")), str(g.get("name",""))] for i,g in enumerate(games)]
     try: ws_index.update(values=[["#", "game_code", "game_name"]], range_name="A1")
     except APIError: pass
     ws_index.update(values=(idx_rows or [["", "", "No games"]]), range_name="A2")
 
-    # Run log
+    # Load run log
     runlog = read_runlog(ss)
 
     results = [
@@ -679,13 +740,12 @@ def main():
         is_new = (latest_date != rl.get("LastResultDate",""))
 
         if is_new:
-            # Evaluate pending, then write fresh predictions
             evaluate_pending_predictions(ss, game_label, merged_rows[0])
             write_predictions_for_game(ss, game_label, merged_rows, next_draw)
             runlog[game_label] = {"LastResultDate": latest_date, "LastPredictedNextDraw": next_draw or ""}
 
     write_runlog(ss, runlog)
-    print("Success! v4+LLM ran: merged results, scored pending predictions on new results, and generated new predictions (including llm_gpt if enabled).")
+    print("Success! v4.2 ran: merged results, scored pending predictions on new results, and generated per‑game totals with adaptive allocation (no cap per method).")
 
 if __name__ == "__main__":
     main()
