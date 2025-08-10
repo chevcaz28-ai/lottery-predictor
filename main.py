@@ -1,31 +1,46 @@
 #!/usr/bin/env python3
 """
-main.py — v3.2: Supports numeric-keyed top-level JSON with plays/draws/numbers
------------------------------------------------------------------------------
-- Reads the API shape you pasted (top-level dict with "0","1",...).
-- Drills into each game's `plays` -> each play's `draws` -> `numbers` (objects with value/specialBall).
-- Updates your existing four *Results tabs, protection-safe (no ws.clear()).
+main.py — v4 + LLM method
+- Same as v4 (merge/append results, evaluate past predictions, write new predictions only when new results arrive)
+- Adds an optional ChatGPT/LLM method ("llm_gpt") that proposes a full number set per game.
+- LLM is OFF by default; enable with:
+    - Set OPENAI_API_KEY secret (GitHub Actions → Secrets)
+    - Set ENABLE_LLM_METHOD=1 (env)
+    - Optional: OPENAI_MODEL (defaults to "gpt-4o-mini")
+
+Environment variables used:
+- RAPID_API_KEY, GOOGLE_CREDS_JSON, optional SHEET_NAME
+- ENABLE_PREDICTIONS=1       # default on
+- ENABLE_LLM_METHOD=0/1      # default off
+- OPENAI_API_KEY             # required if ENABLE_LLM_METHOD=1
+- OPENAI_MODEL               # optional; default "gpt-4o-mini"
 """
 
-import os, json, datetime as dt, re
+import os, json, datetime as dt, re, random
 from typing import Any, Dict, List, Optional, Tuple
-import requests, gspread
+
+import requests
+import gspread
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError
 
+# ---------------- Base config ----------------
 DEFAULT_SHEET_NAME = "Lottery Predictor New August 25"
 API_URL_WI = "https://lottery-results.p.rapidapi.com/games-by-state/us/wi"
 API_HOST = "lottery-results.p.rapidapi.com"
 RAW_MAX_ROWS = 5000
 
-TABS_SCHEMA = {
-    "Powerball_Results": ["Date", "N1", "N2", "N3", "N4", "N5", "PB"],
-    "Megabucks_Results": ["Date", "N1", "N2", "N3", "N4", "N5", "N6"],
-    "SuperCash_Results": ["Date", "N1", "N2", "N3", "N4", "N5", "N6", "Doubler"],
-    "Badger5_Results":   ["Date", "N1", "N2", "N3", "N4", "N5"],
+RESULT_SCHEMAS = {
+    "Powerball_Results": ["Date","N1","N2","N3","N4","N5","PB"],
+    "Megabucks_Results": ["Date","N1","N2","N3","N4","N5","N6"],
+    "SuperCash_Results": ["Date","N1","N2","N3","N4","N5","N6","Doubler"],
+    "Badger5_Results":   ["Date","N1","N2","N3","N4","N5"],
 }
 
-def fail(msg: str): raise RuntimeError(msg)
+TRACKER_COLS = ["Timestamp","Game","Prediction","Method","Win Count","Matches","Match Count"]
+
+# ---------------- Utilities ----------------
+def fail(msg:str): raise RuntimeError(msg)
 
 def load_runtime_config():
     sheet_name = os.getenv("SHEET_NAME", DEFAULT_SHEET_NAME)
@@ -70,12 +85,11 @@ def write_raw(ws_raw, data:Dict[str,Any]):
     pretty = json.dumps(data, indent=2, ensure_ascii=False).splitlines()
     try: ws_raw.update(values=[["Raw JSON (pretty)"]], range_name="A1")
     except APIError: pass
-    ws_raw.update(values=[[ln] for ln in pretty], range_name="A2")
+    ws_raw.update(values=[[ln] for ln in pretty[:RAW_MAX_ROWS]], range_name="A2")
 
 def normalize_date(s: Any) -> str:
     s = "" if s is None else str(s).strip()
     if not s: return ""
-    # "08/09/2025" -> 2025-08-09
     m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", s)
     if m: mm,dd,yy = m.groups(); return f"{int(yy):04d}-{int(mm):02d}-{int(dd):02d}"
     m = re.search(r"(\d{4}-\d{2}-\d{2})", s)
@@ -88,11 +102,6 @@ def to_int(v)->Optional[int]:
     except: return None
 
 def parse_numbers_objects(nums: List[Dict[str,Any]])->Tuple[List[int], Optional[int], Optional[str]]:
-    """Return (mains, special_ball_number, doubler_flag) where:
-       - mains are regular numbers in order
-       - special ball = number attached to specialBall.name in {'Powerball','Mega Ball'} (if present)
-       - doubler is 'Y'/'N' if a 'Doubler' entry is present with value 'Y'/'N'/etc.
-    """
     mains: List[int] = []
     special: Optional[int] = None
     doubler: Optional[str] = None
@@ -107,16 +116,22 @@ def parse_numbers_objects(nums: List[Dict[str,Any]])->Tuple[List[int], Optional[
             elif "doubler" in name:
                 v = (str(val) if val is not None else "").strip().upper()
                 doubler = "Y" if v in ("Y","YES","TRUE","1") else ("N" if v in ("N","NO","FALSE","0") else v)
-            else:
-                # Other specials (e.g., Power Play multiplier) are ignored for core results
-                pass
         else:
             iv = to_int(val)
             if iv is not None: mains.append(iv)
     return mains, special, doubler
 
+def top_level_games(data: Dict[str,Any]) -> List[Dict[str,Any]]:
+    if not isinstance(data, dict): return []
+    if isinstance(data.get("data"), list): return [g for g in data["data"] if isinstance(g, dict)]
+    if isinstance(data.get("games"), list): return [g for g in data["games"] if isinstance(g, dict)]
+    games = []
+    for k,v in data.items():
+        if str(k).isdigit() and isinstance(v, dict):
+            games.append(v)
+    return games
+
 def collect_draws_from_game(game: Dict[str,Any]) -> List[Dict[str,Any]]:
-    """Game -> plays -> draws. Flatten all plays' draws (usually one play per game)."""
     out: List[Dict[str,Any]] = []
     plays = game.get("plays") if isinstance(game, dict) else None
     if not isinstance(plays, list): return out
@@ -124,23 +139,8 @@ def collect_draws_from_game(game: Dict[str,Any]) -> List[Dict[str,Any]]:
         if not isinstance(p, dict): continue
         draws = p.get("draws")
         if not isinstance(draws, list): continue
-        for d in draws:
-            if not isinstance(d, dict): continue
-            out.append(d)
+        out.extend([d for d in draws if isinstance(d, dict)])
     return out
-
-def top_level_games(data: Dict[str,Any]) -> List[Dict[str,Any]]:
-    """The API uses numeric keys "0","1",... Map them to a list of game dicts with 'name'."""
-    if not isinstance(data, dict): return []
-    # Try typical keys first
-    if isinstance(data.get("data"), list): return [g for g in data["data"] if isinstance(g, dict)]
-    if isinstance(data.get("games"), list): return [g for g in data["games"] if isinstance(g, dict)]
-    # Fallback: numeric-keyed map
-    games = []
-    for k,v in data.items():
-        if k.isdigit() and isinstance(v, dict):
-            games.append(v)
-    return games
 
 def col_letter(n:int)->str:
     s=""
@@ -149,16 +149,23 @@ def col_letter(n:int)->str:
         s = chr(65+r)+s
     return s or "A"
 
-def write_rows(ws, headers: List[str], rows: List[List[Any]], note_label:str):
+def read_existing(ws, expected_cols:int) -> List[List[Any]]:
+    all_vals = ws.get_all_values()
+    body = all_vals[1:] if len(all_vals)>=2 else []
+    fixed = []
+    for row in body:
+        r = (row + [""]*expected_cols)[:expected_cols]
+        fixed.append(r)
+    return fixed
+
+def write_table(ws, headers: List[str], rows: List[List[Any]]):
     try: ws.update(values=[headers], range_name="A1")
     except APIError: pass
-    ncols = len(headers)
-    end_col = col_letter(ncols)
+    ncols = len(headers); end_col = col_letter(ncols)
     if rows:
         ws.update(values=rows, range_name=f"A2:{end_col}{len(rows)+1}")
     else:
-        ws.update(values=[[ "", "", "", f"No draws found for {note_label}"]], range_name="A2")
-    # pad blank rows to wipe leftovers (protection-safe)
+        ws.update(values=[["" for _ in range(ncols)]], range_name="A2")
     BLANK_PAD = 200
     blanks = [["" for _ in range(ncols)] for __ in range(BLANK_PAD)]
     try:
@@ -166,28 +173,462 @@ def write_rows(ws, headers: List[str], rows: List[List[Any]], note_label:str):
     except APIError:
         pass
 
+def merge_by_date(existing: List[List[Any]], new_rows: List[List[Any]], date_idx:int=0) -> List[List[Any]]:
+    m = {}
+    for r in existing:
+        key = str(r[date_idx]).strip()
+        if key: m[key] = r
+    for r in new_rows:
+        key = str(r[date_idx]).strip()
+        if key and key not in m:
+            m[key] = r
+    rows = list(m.values())
+    rows.sort(key=lambda r: str(r[date_idx]), reverse=True)
+    return rows
+
+# ---------- Build game rows ----------
+def pb_rows_from_draws(draws: List[Dict[str,Any]]) -> List[List[Any]]:
+    out=[]
+    for d in draws:
+        date = normalize_date(d.get("date"))
+        mains, special, _ = parse_numbers_objects(d.get("numbers", []))
+        n1,n2,n3,n4,n5 = (mains + [None]*5)[:5]
+        out.append([date,n1,n2,n3,n4,n5,special])
+    out.sort(key=lambda r: (r[0] or ""), reverse=True)
+    return out
+
+def mg_rows_from_draws(draws: List[Dict[str,Any]]) -> List[List[Any]]:
+    out=[]
+    for d in draws:
+        date = normalize_date(d.get("date"))
+        mains, _, _ = parse_numbers_objects(d.get("numbers", []))
+        n1,n2,n3,n4,n5,n6 = (mains + [None]*6)[:6]
+        out.append([date,n1,n2,n3,n4,n5,n6])
+    out.sort(key=lambda r: (r[0] or ""), reverse=True)
+    return out
+
+def sc_rows_from_draws(draws: List[Dict[str,Any]]) -> List[List[Any]]:
+    out=[]
+    for d in draws:
+        date = normalize_date(d.get("date"))
+        mains, _, doubler = parse_numbers_objects(d.get("numbers", []))
+        n1,n2,n3,n4,n5,n6 = (mains + [None]*6)[:6]
+        out.append([date,n1,n2,n3,n4,n5,n6, (doubler or "")])
+    out.sort(key=lambda r: (r[0] or ""), reverse=True)
+    return out
+
+def b5_rows_from_draws(draws: List[Dict[str,Any]]) -> List[List[Any]]:
+    out=[]
+    for d in draws:
+        date = normalize_date(d.get("date"))
+        mains, _, _ = parse_numbers_objects(d.get("numbers", []))
+        n1,n2,n3,n4,n5 = (mains + [None]*5)[:5]
+        out.append([date,n1,n2,n3,n4,n5])
+    out.sort(key=lambda r: (r[0] or ""), reverse=True)
+    return out
+
+# ---------- Non-LLM methods ----------
+def unique_combo(nums: List[int], need:int, lo:int, hi:int) -> List[int]:
+    s = sorted(set(n for n in nums if isinstance(n,int) and lo<=n<=hi))
+    while len(s) < need:
+        x = random.randint(lo, hi)
+        if x not in s: s.append(x)
+    return sorted(s)[:need]
+
+def freq_method(rows: List[List[Any]], need:int, lo:int, hi:int, window:int=50) -> List[int]:
+    hist = {}
+    for r in rows[:window]:
+        for v in r[1:1+need]:
+            try:
+                v = int(v); 
+                if lo<=v<=hi:
+                    hist[v] = hist.get(v, 0)+1
+            except: pass
+    ranked = sorted(hist.items(), key=lambda kv: (-kv[1], kv[0]))
+    base = [k for k,_ in ranked][:need]
+    return unique_combo(base, need, lo, hi)
+
+def recency_method(rows: List[List[Any]], need:int, lo:int, hi:int, decay:float=0.9) -> List[int]:
+    hist = {}
+    w = 1.0
+    for r in rows:
+        for v in r[1:1+need]:
+            try:
+                v=int(v)
+                if lo<=v<=hi: hist[v]=hist.get(v,0)+w
+            except: pass
+        w *= decay
+    ranked = sorted(hist.items(), key=lambda kv: (-kv[1], kv[0]))
+    base = [k for k,_ in ranked][:need]
+    return unique_combo(base, need, lo, hi)
+
+def markov1_method(rows: List[List[Any]], need:int, lo:int, hi:int) -> List[int]:
+    seq = []
+    for r in rows:
+        for v in r[1:1+need]:
+            try:
+                v=int(v)
+                if lo<=v<=hi: seq.append(v)
+            except: pass
+    trans = {i:{} for i in range(lo,hi+1)}
+    for a,b in zip(seq, seq[1:]):
+        trans[a][b] = trans[a].get(b,0)+1
+    seed = []
+    for r in rows[:3]:
+        for v in r[1:1+need]:
+            try:
+                v=int(v)
+                if lo<=v<=hi and v not in seed:
+                    seed.append(v)
+            except: pass
+    cand = []
+    for s in seed:
+        nxt = sorted(trans.get(s, {}).items(), key=lambda kv: (-kv[1], kv[0]))
+        cand.extend([k for k,_ in nxt[:2]])
+    return unique_combo(cand, need, lo, hi)
+
+def pick_powerball(rows: List[List[Any]]) -> int:
+    hist = {}
+    w = 1.0
+    for r in rows:
+        try:
+            pb = int(r[6]); hist[pb] = hist.get(pb,0)+w
+        except: pass
+        w *= 0.95
+    if not hist: return random.randint(1,26)
+    return sorted(hist.items(), key=lambda kv:(-kv[1], kv[0]))[0][0]
+
+def fmt_prediction_str(game:str, nums: List[int], special: Optional[int]=None) -> str:
+    core = "-".join(str(n) for n in nums)
+    if game=="Powerball" and special is not None:
+        return f"{core} (+PB {special})"
+    return core
+
+def intersect_count(a: List[int], b: List[int]) -> Tuple[List[int], int]:
+    aset = set(a); bset = set(b)
+    inter = sorted(list(aset & bset))
+    return inter, len(inter)
+
+def parse_prediction_to_nums(game:str, pred_str:str) -> Tuple[List[int], Optional[int]]:
+    main_part = pred_str
+    special = None
+    if game=="Powerball" and "(+PB" in pred_str:
+        main_part = pred_str.split("(+PB")[0].strip()
+        try:
+            special = int(re.findall(r"\(\+PB\s+(\d+)\)", pred_str)[0])
+        except:
+            special = None
+    mains = []
+    for tok in re.split(r"[-\s,]+", main_part):
+        tok = tok.strip()
+        if tok.isdigit(): mains.append(int(tok))
+    return mains, special
+
+# ---------- Run_Log helpers ----------
+def read_runlog(ss):
+    ws = get_or_create_worksheet(ss, "Run_Log", rows=100, cols=4)
+    vals = ws.get_all_values()
+    if not vals:
+        try: ws.update(values=[["Game","LastResultDate","LastPredictedNextDraw"]], range_name="A1")
+        except APIError: pass
+        return {}
+    header = vals[0]
+    rows = vals[1:]
+    idx = {name:i for i,name in enumerate(header)}
+    db = {}
+    for r in rows:
+        if not r or len(r)<1: continue
+        gm = r[0].strip()
+        last_res = r[idx.get("LastResultDate",1)] if len(r)>1 else ""
+        last_pred = r[idx.get("LastPredictedNextDraw",2)] if len(r)>2 else ""
+        db[gm] = {"LastResultDate": last_res, "LastPredictedNextDraw": last_pred}
+    return db
+
+def write_runlog(ss, db):
+    ws = get_or_create_worksheet(ss, "Run_Log", rows=100, cols=4)
+    rows = [["Game","LastResultDate","LastPredictedNextDraw"]]
+    for gm,info in db.items():
+        rows.append([gm, info.get("LastResultDate",""), info.get("LastPredictedNextDraw","")])
+    ws.update(values=rows, range_name="A1")
+
+# ---------- Evaluate past predictions ----------
+def evaluate_pending_predictions(ss, game:str, latest_row: List[Any]):
+    ws = get_or_create_worksheet(ss, "Prediction_Tracker", rows=5000, cols=len(TRACKER_COLS))
+    try: ws.update(values=[TRACKER_COLS], range_name="A1")
+    except APIError: pass
+
+    all_vals = ws.get_all_values()
+    if not all_vals: return
+    header = all_vals[0]; rows = all_vals[1:]
+    col_idx = {name:i for i,name in enumerate(header)}
+
+    if game=="Powerball":
+        latest_mains = [int(x) for x in latest_row[1:6] if str(x).isdigit()]
+    elif game=="Megabucks":
+        latest_mains = [int(x) for x in latest_row[1:7] if str(x).isdigit()]
+    elif game=="Super Cash":
+        latest_mains = [int(x) for x in latest_row[1:7] if str(x).isdigit()]
+    elif game=="Badger 5":
+        latest_mains = [int(x) for x in latest_row[1:6] if str(x).isdigit()]
+    else:
+        latest_mains = []
+
+    updates = []
+    for i, r in enumerate(rows, start=2):
+        try:
+            gm = r[col_idx["Game"]].strip()
+        except: 
+            continue
+        if gm != game: 
+            continue
+        matches = r[col_idx["Matches"]].strip() if len(r)>col_idx["Matches"] else ""
+        if matches != "":
+            continue
+        pred_str = r[col_idx["Prediction"]]
+        pred_nums, _ = parse_prediction_to_nums(game, pred_str)
+        inter, cnt = intersect_count(pred_nums, latest_mains)
+        win = 1 if (game=="Powerball" and cnt==5) or \
+                  (game=="Megabucks" and cnt==6) or \
+                  (game=="Super Cash" and cnt==6) or \
+                  (game=="Badger 5" and cnt==5) else 0
+        updates.append((i, {"Win Count": str(win), "Matches": ",".join(str(x) for x in inter), "Match Count": str(cnt)}))
+    if updates:
+        mod_rows = [list(r) + [""]*(len(TRACKER_COLS)-len(r)) for r in rows]
+        for i, changes in updates:
+            ridx = i-2
+            for k,v in changes.items():
+                c = col_idx[k]
+                mod_rows[ridx][c] = v
+        end_col = col_letter(len(TRACKER_COLS))
+        ws.update(values=mod_rows, range_name=f"A2:{end_col}{len(mod_rows)+1}")
+
+# ---------- Adaptive weights ----------
+def adaptive_weights(ss, game:str) -> Dict[str,float]:
+    ws = get_or_create_worksheet(ss, "Prediction_Tracker", rows=5000, cols=len(TRACKER_COLS))
+    recs = ws.get_all_records()
+    stats = {}
+    for r in recs:
+        if r.get("Game","").strip()!=game: continue
+        md = r.get("Method","").strip()
+        try: mc = int(str(r.get("Match Count","0")).strip() or "0")
+        except: mc = 0
+        try: wc = int(str(r.get("Win Count","0")).strip() or "0")
+        except: wc = 0
+        if md not in stats: stats[md] = {"cnt":0,"match_sum":0,"wins":0}
+        stats[md]["cnt"] += 1
+        stats[md]["match_sum"] += mc
+        stats[md]["wins"] += wc
+    weights = {}
+    for md, s in stats.items():
+        if s["cnt"]==0: continue
+        score = (s["match_sum"]/s["cnt"]) + 5.0*s["wins"]
+        weights[md] = score
+    if not weights: return {}
+    total = sum(v for v in weights.values() if v>0)
+    if total<=0:
+        return {k:1.0/len(weights) for k in weights}
+    return {k:v/total for k,v in weights.items()}
+
+# ---------- LLM method ----------
+def llm_pick_numbers(game:str, rows_hist: List[List[Any]]) -> Tuple[List[int], Optional[int]]:
+    """
+    Calls OpenAI to propose a full number set. Returns (mains, special) where special is only for Powerball.
+    Expects OPENAI_API_KEY; model defaults to "gpt-4o-mini".
+    If the API isn't available, returns empty list so caller can skip.
+    """
+    if os.getenv("ENABLE_LLM_METHOD","0") not in ("1","true","True","YES","yes"):
+        return [], None
+    api_key = os.getenv("OPENAI_API_KEY","").strip()
+    if not api_key:
+        return [], None
+
+    model = os.getenv("OPENAI_MODEL","gpt-4o-mini")
+    # Pack a compact history summary for the prompt
+    hist_lines = []
+    for r in rows_hist[:100]:  # keep prompt small
+        date = str(r[0])
+        if game=="Powerball":
+            nums = [r[1],r[2],r[3],r[4],r[5]]; pb = r[6]
+            hist_lines.append(f"{date}: {nums} PB:{pb}")
+        elif game=="Megabucks":
+            nums = [r[1],r[2],r[3],r[4],r[5],r[6]]
+            hist_lines.append(f"{date}: {nums}")
+        elif game=="Super Cash":
+            nums = [r[1],r[2],r[3],r[4],r[5],r[6]]; d = r[7]
+            hist_lines.append(f"{date}: {nums} D:{d}")
+        elif game=="Badger 5":
+            nums = [r[1],r[2],r[3],r[4],r[5]]
+            hist_lines.append(f"{date}: {nums}")
+    hist_text = "\n".join(hist_lines)
+
+    system = (
+        "You generate lottery number-set predictions strictly in the required ranges. "
+        "Return only JSON like {\"mains\":[...],\"special\":<int or null>} with no extra text."
+    )
+
+    if game=="Powerball":
+        rule = "Pick 5 distinct mains between 1 and 69, and 1 Powerball between 1 and 26."
+    elif game=="Megabucks":
+        rule = "Pick 6 distinct mains between 1 and 49. No special ball."
+    elif game=="Super Cash":
+        rule = "Pick 6 distinct mains between 1 and 39. No special ball."
+    elif game=="Badger 5":
+        rule = "Pick 5 distinct mains between 1 and 31. No special ball."
+    else:
+        return [], None
+
+    user = (
+        f"Game: {game}\n"
+        f"Rules: {rule}\n"
+        f"Recent results (newest first):\n{hist_text}\n"
+        "Respond ONLY with JSON: {\"mains\":[int,...],\"special\":null or int}"
+    )
+
+    # Support both OpenAI Python SDK v1 and legacy
+    mains, special = [], None
+    try:
+        try:
+            # New SDK style
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role":"system","content":system},
+                    {"role":"user","content":user}
+                ],
+                temperature=0.7,
+            )
+            content = resp.choices[0].message.content.strip()
+        except Exception:
+            # Legacy style fallback
+            import openai
+            openai.api_key = api_key
+            resp = openai.ChatCompletion.create(
+                model=model,
+                messages=[
+                    {"role":"system","content":system},
+                    {"role":"user","content":user}
+                ],
+                temperature=0.7,
+            )
+            content = resp["choices"][0]["message"]["content"].strip()
+
+        # Extract JSON
+        import json as _json
+        js = _json.loads(content)
+        mains = [int(x) for x in js.get("mains",[]) if isinstance(x,(int,str)) and str(x).isdigit()]
+        sp = js.get("special", None)
+        special = int(sp) if (sp is not None and str(sp).isdigit()) else None
+    except Exception:
+        # If the LLM call fails for any reason, quietly skip
+        return [], None
+
+    # Validate ranges
+    def clip_and_unique(nums, need, lo, hi):
+        s = []
+        for x in nums:
+            try:
+                xi = int(x)
+                if lo<=xi<=hi and xi not in s:
+                    s.append(xi)
+            except: pass
+        # top up randomly if not enough
+        while len(s) < need:
+            xi = random.randint(lo, hi)
+            if xi not in s:
+                s.append(xi)
+        return sorted(s)[:need]
+
+    if game=="Powerball":
+        mains = clip_and_unique(mains, 5, 1, 69)
+        if special is None or not (1<=special<=26):
+            special = random.randint(1,26)
+    elif game=="Megabucks":
+        mains = clip_and_unique(mains, 6, 1, 49)
+        special = None
+    elif game=="Super Cash":
+        mains = clip_and_unique(mains, 6, 1, 39)
+        special = None
+    elif game=="Badger 5":
+        mains = clip_and_unique(mains, 5, 1, 31)
+        special = None
+
+    return mains, special
+
+# ---------- Write new predictions ----------
+def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_draw_date:str):
+    if os.getenv("ENABLE_PREDICTIONS","1") not in ("1","true","True","YES","yes"):
+        return
+    ws = get_or_create_worksheet(ss, "Prediction_Tracker", rows=10000, cols=len(TRACKER_COLS))
+    try: ws.update(values=[TRACKER_COLS], range_name="A1")
+    except APIError: pass
+
+    existing = ws.get_all_records()
+    today = dt.datetime.utcnow().strftime("%Y-%m-%d")
+    existing_keys = {(str(r.get("Timestamp",""))[:10], r.get("Game","").strip(), r.get("Method","").strip()) for r in existing}
+
+    def append_rows(new_rows: List[List[str]]):
+        if not new_rows: return
+        start_row = len(existing) + 2
+        end_row = start_row + len(new_rows) - 1
+        end_col = col_letter(len(TRACKER_COLS))
+        ws.update(values=new_rows, range_name=f"A{start_row}:{end_col}{end_row}")
+
+    if game=="Powerball":
+        need, lo, hi = 5, 1, 69
+    elif game=="Megabucks":
+        need, lo, hi = 6, 1, 49
+    elif game=="Super Cash":
+        need, lo, hi = 6, 1, 39
+    elif game=="Badger 5":
+        need, lo, hi = 5, 1, 31
+    else:
+        return
+
+    # Non-LLM methods
+    methods: Dict[str, Tuple[List[int], Optional[int]]] = {}
+    methods["last_draw_baseline"] = (rows_hist[0][1:1+need] if rows_hist else [], None)
+    methods["freq50"] = (freq_method(rows_hist, need, lo, hi, window=50), None)
+    methods["recency"] = (recency_method(rows_hist, need, lo, hi, decay=0.92), None)
+    methods["markov1"] = (markov1_method(rows_hist, need, lo, hi), None)
+
+    # Powerball special ball selection
+    special_pb = pick_powerball(rows_hist) if game=="Powerball" else None
+
+    # LLM method (optional)
+    mains_llm, special_llm = llm_pick_numbers(game, rows_hist)
+    if mains_llm:
+        methods["llm_gpt"] = (mains_llm, special_llm if game=="Powerball" else None)
+
+    timestamp = dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    to_write = []
+    for md, (nums, sp) in methods.items():
+        key = (today, game, md)
+        if key in existing_keys:
+            continue
+        # Use PB choice for non-LLM methods when game is Powerball
+        special = sp if md=="llm_gpt" else (special_pb if game=="Powerball" else None)
+        pred_str = fmt_prediction_str(game, list(map(int, nums)) if nums else [], special)
+        to_write.append([timestamp, game, pred_str, md, "0", "", ""])
+
+    append_rows(to_write)
+
+# ---------- Main orchestrator ----------
 def main():
     sheet_name, rapid_key, client, sa_email = load_runtime_config()
     ss = open_sheet(client, sheet_name)
 
-    # Base sheets
     ws_health = get_or_create_worksheet(ss, "Health_Check", rows=100, cols=3)
     ws_raw    = get_or_create_worksheet(ss, "Raw_API_WI", rows=RAW_MAX_ROWS+10, cols=1)
     ws_index  = get_or_create_worksheet(ss, "Games_Index", rows=100, cols=3)
-
     append_health_check(ws_health)
 
     data = fetch_wi_results(rapid_key)
     write_raw(ws_raw, data)
 
     games = top_level_games(data)
-    # Index
-    idx_rows = [[i+1, str(g.get("code","")), str(g.get("name",""))] for i,g in enumerate(games)]
-    try: ws_index.update(values=[["#", "game_code", "game_name"]], range_name="A1")
-    except APIError: pass
-    ws_index.update(values=(idx_rows or [["", "", "No games"]]), range_name="A2")
 
-    # Helper to find a game by name contains
     def find_game(needle:str)->Optional[Dict[str,Any]]:
         n = needle.lower()
         for g in games:
@@ -195,63 +636,56 @@ def main():
             if n in name: return g
         return None
 
-    # Extract rows per game
-    # POWERBALL
-    pb_ws = get_or_create_worksheet(ss, "Powerball_Results", rows=2000, cols=len(TABS_SCHEMA["Powerball_Results"]))
-    pb_game = find_game("powerball")
-    pb_rows: List[List[Any]] = []
-    if pb_game:
-        for d in collect_draws_from_game(pb_game):
-            date = normalize_date(d.get("date"))
-            mains, special, _ = parse_numbers_objects(d.get("numbers", []))
-            # We expect 5 mains + 1 powerball
-            n1,n2,n3,n4,n5 = (mains + [None]*5)[:5]
-            pb_rows.append([date, n1,n2,n3,n4,n5, special])
-        pb_rows.sort(key=lambda r: (r[0] or ""), reverse=True)
-    write_rows(pb_ws, TABS_SCHEMA["Powerball_Results"], pb_rows, "Powerball")
+    def merge_and_write(game_label: str, ws_title: str, need: int, row_builder):
+        ws = get_or_create_worksheet(ss, ws_title, rows=6000, cols=len(RESULT_SCHEMAS[ws_title]))
+        existing = read_existing(ws, expected_cols=len(RESULT_SCHEMAS[ws_title]))
+        g = find_game(game_label.lower())
+        draws = collect_draws_from_game(g) if g else []
+        rows = row_builder(draws)
+        merged = merge_by_date(existing, rows, date_idx=0)
+        write_table(ws, RESULT_SCHEMAS[ws_title], merged)
+        next_draw = normalize_date(draws[0].get("nextDrawDate")) if draws else ""
+        return merged, next_draw
 
-    # MEGABUCKS
-    mg_ws = get_or_create_worksheet(ss, "Megabucks_Results", rows=2000, cols=len(TABS_SCHEMA["Megabucks_Results"]))
-    mg_game = find_game("megabucks")
-    mg_rows: List[List[Any]] = []
-    if mg_game:
-        for d in collect_draws_from_game(mg_game):
-            date = normalize_date(d.get("date"))
-            mains, _, _ = parse_numbers_objects(d.get("numbers", []))
-            n1,n2,n3,n4,n5,n6 = (mains + [None]*6)[:6]
-            mg_rows.append([date, n1,n2,n3,n4,n5,n6])
-        mg_rows.sort(key=lambda r: (r[0] or ""), reverse=True)
-    write_rows(mg_ws, TABS_SCHEMA["Megabucks_Results"], mg_rows, "Megabucks")
+    # Merge/write each game
+    merged_pb, next_pb   = merge_and_write("Powerball",   "Powerball_Results", 5, pb_rows_from_draws)
+    merged_mg, next_mg   = merge_and_write("Megabucks",   "Megabucks_Results", 6, mg_rows_from_draws)
+    merged_sc, next_sc   = merge_and_write("Super Cash",  "SuperCash_Results", 6, sc_rows_from_draws)
+    merged_b5, next_b5   = merge_and_write("Badger 5",    "Badger5_Results",   5, b5_rows_from_draws)
 
-    # SUPERCASH
-    sc_ws = get_or_create_worksheet(ss, "SuperCash_Results", rows=2000, cols=len(TABS_SCHEMA["SuperCash_Results"]))
-    sc_game = find_game("super cash")
-    sc_rows: List[List[Any]] = []
-    if sc_game:
-        for d in collect_draws_from_game(sc_game):
-            date = normalize_date(d.get("date"))
-            mains, _, doubler = parse_numbers_objects(d.get("numbers", []))
-            n1,n2,n3,n4,n5,n6 = (mains + [None]*6)[:6]
-            sc_rows.append([date, n1,n2,n3,n4,n5,n6, (doubler or "")])
-        sc_rows.sort(key=lambda r: (r[0] or ""), reverse=True)
-    write_rows(sc_ws, TABS_SCHEMA["SuperCash_Results"], sc_rows, "Super Cash")
+    # Index
+    idx_rows = []
+    for i, g in enumerate(games):
+        idx_rows.append([i+1, str(g.get("code","")), str(g.get("name",""))])
+    try: ws_index.update(values=[["#", "game_code", "game_name"]], range_name="A1")
+    except APIError: pass
+    ws_index.update(values=(idx_rows or [["", "", "No games"]]), range_name="A2")
 
-    # BADGER5
-    b5_ws = get_or_create_worksheet(ss, "Badger5_Results", rows=2000, cols=len(TABS_SCHEMA["Badger5_Results"]))
-    b5_game = find_game("badger 5")
-    b5_rows: List[List[Any]] = []
-    if b5_game:
-        for d in collect_draws_from_game(b5_game):
-            date = normalize_date(d.get("date"))
-            mains, _, _ = parse_numbers_objects(d.get("numbers", []))
-            n1,n2,n3,n4,n5 = (mains + [None]*5)[:5]
-            b5_rows.append([date, n1,n2,n3,n4,n5])
-        b5_rows.sort(key=lambda r: (r[0] or ""), reverse=True)
-    write_rows(b5_ws, TABS_SCHEMA["Badger5_Results"], b5_rows, "Badger 5")
+    # Run log
+    runlog = read_runlog(ss)
 
-    print("Success! Results loaded using v3.2 schema handler.")
-    if sa_email:
-        print(f"(If cells still won't update, allow editor access for {sa_email} on protected ranges.)")
+    results = [
+        ("Powerball", merged_pb, next_pb),
+        ("Megabucks", merged_mg, next_mg),
+        ("Super Cash", merged_sc, next_sc),
+        ("Badger 5", merged_b5, next_b5),
+    ]
+
+    for game_label, merged_rows, next_draw in results:
+        if not merged_rows: 
+            continue
+        latest_date = str(merged_rows[0][0]).strip()
+        rl = runlog.get(game_label, {"LastResultDate":"", "LastPredictedNextDraw":""})
+        is_new = (latest_date != rl.get("LastResultDate",""))
+
+        if is_new:
+            # Evaluate pending, then write fresh predictions
+            evaluate_pending_predictions(ss, game_label, merged_rows[0])
+            write_predictions_for_game(ss, game_label, merged_rows, next_draw)
+            runlog[game_label] = {"LastResultDate": latest_date, "LastPredictedNextDraw": next_draw or ""}
+
+    write_runlog(ss, runlog)
+    print("Success! v4+LLM ran: merged results, scored pending predictions on new results, and generated new predictions (including llm_gpt if enabled).")
 
 if __name__ == "__main__":
     main()
