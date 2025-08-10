@@ -24,6 +24,11 @@ jobs:
 
       - name: Run script
         env:
-          GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
-          RAPID_API_KEY:      ${{ secrets.RAPID_API_KEY }}
-        run: python main.py
+            GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
+            RAPID_API_KEY: ${{ secrets.RAPID_API_KEY }}
+            OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}     # <-- add this
+            ENABLE_LLM_METHOD: "1"                            # <-- turn on LLM method
+            # OPENAI_MODEL: "gpt-4o-mini"                     # optional override
+        run: |
+          pip install --upgrade openai
+          python main.py
