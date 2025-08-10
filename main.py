@@ -1,20 +1,12 @@
 #!/usr/bin/env python3
 """
-main.py — Integrates with existing tracker sheets (results only, no ML yet)
----------------------------------------------------------------------------
-This script will:
-- Validate env vars and connect to your Google Sheet.
-- Update ONLY these existing result tabs with the exact columns you already use:
-    Powerball_Results: Date, N1..N5, PB
-    Megabucks_Results: Date, N1..N6
-    SuperCash_Results: Date, N1..N6, Doubler
-    Badger5_Results:   Date, N1..N5
-- Append a timestamp to Health_Check and keep Raw_API_WI + Games_Index for debugging.
-- (Predictions are NOT written yet—after you confirm results load correctly, we’ll add that.)
-
-Safe behavior:
-- Each results tab is cleared and fully rewritten from the API’s current history.
-- If a game’s draws can’t be parsed, the tab will contain a single row noting the parser issue.
+main.py — v3.1: Results into existing tabs, protection-safe writes
+------------------------------------------------------------------
+Changes vs v3:
+- Avoids ws.clear() so protected tabs don't error.
+- Writes headers with try/except; if header row is protected we skip it.
+- Overwrites the body ("A2:...") explicitly; also writes blank rows to clean leftovers.
+- Uses gspread .update(values=..., range_name=...) to silence deprecation warnings.
 """
 
 import os
@@ -26,17 +18,14 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 import gspread
 from google.oauth2.service_account import Credentials
+from gspread.exceptions import APIError
 
-# -------------------------
-# Config
-# -------------------------
 DEFAULT_SHEET_NAME = "Lottery Predictor New August 25"
 API_URL_WI = "https://lottery-results.p.rapidapi.com/games-by-state/us/wi"
 API_HOST = "lottery-results.p.rapidapi.com"
 
 RAW_MAX_ROWS = 5000
 
-# Expected column headers by tab
 TABS_SCHEMA = {
     "Powerball_Results": ["Date", "N1", "N2", "N3", "N4", "N5", "PB"],
     "Megabucks_Results": ["Date", "N1", "N2", "N3", "N4", "N5", "N6"],
@@ -44,9 +33,6 @@ TABS_SCHEMA = {
     "Badger5_Results":   ["Date", "N1", "N2", "N3", "N4", "N5"],
 }
 
-# -------------------------
-# Helpers
-# -------------------------
 def fail(msg: str) -> None:
     raise RuntimeError(msg)
 
@@ -91,10 +77,13 @@ def append_health_check(ws_health: gspread.Worksheet) -> None:
     now_utc = dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     headers = ["Timestamp_UTC", "Status"]
     cur = ws_health.get_all_values()
-    if not cur or (cur and cur[0] != headers):
-        ws_health.clear()
-        ws_health.append_row(headers, value_input_option="RAW")
-    ws_health.append_row([now_utc, "OK"], value_input_option="RAW")
+    try:
+        if not cur or (cur and cur[0] != headers):
+            ws_health.update(values=[headers], range_name="A1")
+        ws_health.append_row([now_utc, "OK"], value_input_option="RAW")
+    except APIError as e:
+        # If even append is protected, surface a clear message
+        fail(f'Cannot write to "Health_Check" due to sheet protection. Add the service account as an editor for that sheet. Details: {e}')
 
 def fetch_wi_results(rapid_key: str) -> Dict[str, Any]:
     headers = {"x-rapidapi-key": rapid_key, "x-rapidapi-host": API_HOST}
@@ -107,24 +96,25 @@ def write_raw_api(ws_raw: gspread.Worksheet, data: Dict[str, Any]) -> None:
     lines = pretty.splitlines()
     if len(lines) > RAW_MAX_ROWS:
         lines = lines[-RAW_MAX_ROWS:]
-    ws_raw.clear()
-    ws_raw.update("A1", [["Raw JSON (pretty)"]])
-    ws_raw.update("A2", [[line] for line in lines] or [["<empty>"]], value_input_option="RAW")
+    try:
+        ws_raw.update(values=[["Raw JSON (pretty)"]], range_name="A1")
+    except APIError:
+        pass  # if header protected, skip
+    # Write body starting at A2
+    body = [[line] for line in lines] or [["<empty>"]]
+    ws_raw.update(values=body, range_name="A2")
 
 def detect_games_list(data: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
     if not isinstance(data, dict):
         return None
-    if isinstance(data.get("data"), list):
-        return [x for x in data["data"] if isinstance(x, dict)]
-    if isinstance(data.get("games"), list):
-        return [x for x in data["games"] if isinstance(x, dict)]
-    # nested
+    for key in ("data", "games"):
+        if isinstance(data.get(key), list):
+            return [x for x in data[key] if isinstance(x, dict)]
     for v in data.values():
         if isinstance(v, dict):
-            if isinstance(v.get("data"), list):
-                return [x for x in v["data"] if isinstance(x, dict)]
-            if isinstance(v.get("games"), list):
-                return [x for x in v["games"] if isinstance(x, dict)]
+            for key in ("data", "games"):
+                if isinstance(v.get(key), list):
+                    return [x for x in v[key] if isinstance(x, dict)]
     return None
 
 def as_str(x: Any) -> str:
@@ -149,7 +139,6 @@ def normalize_date(value: Any) -> str:
     return s
 
 def to_int_list(v: Any) -> List[Optional[int]]:
-    """Turn a list or a comma/space string into a list of ints (non-digits become None)."""
     if isinstance(v, list):
         parts = v
     else:
@@ -172,7 +161,6 @@ def pick_first(keys: List[str], d: Dict[str, Any]) -> Any:
     return None
 
 def extract_draws_generic(game: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Return a list of draw dicts with at least date + a numbers container + possible extras."""
     draws = None
     for key in ["draws", "results", "latest_results", "past_results", "history", "recent_draws"]:
         v = game.get(key)
@@ -187,10 +175,8 @@ def parse_powerball_rows(draws: List[Dict[str, Any]]) -> List[List[Any]]:
     rows = []
     for d in draws:
         date = normalize_date(pick_first(["date","draw_date","time","timestamp"], d))
-        # common shapes
         nums = pick_first(["numbers","winning_numbers","winningNumbers","balls","regular","main"], d)
         pb = pick_first(["powerball","pb","bonus_ball","bonusBall"], d)
-        # try nested
         if nums is None:
             wn = pick_first(["winningNumbers","winning_numbers"], d)
             if isinstance(wn, dict):
@@ -203,7 +189,6 @@ def parse_powerball_rows(draws: List[Dict[str, Any]]) -> List[List[Any]]:
             lst = [x for x in to_int_list(pb) if x is not None]
             pbv = lst[0] if lst else None
         rows.append([date, n1,n2,n3,n4,n5, pbv])
-    # newest first
     rows.sort(key=lambda r: (r[0] or ""), reverse=True)
     return rows
 
@@ -235,7 +220,6 @@ def parse_supercash_rows(draws: List[Dict[str, Any]]) -> List[List[Any]]:
                 doubler = doubler or wn.get("doubler")
         arr = [x for x in to_int_list(nums) if x is not None]
         n1,n2,n3,n4,n5,n6 = (arr + [None]*6)[:6]
-        # Normalize doubler to Yes/No/blank
         dstr = as_str(doubler).strip().lower()
         if dstr in ["true","yes","y","1"]:
             dnorm = "Yes"
@@ -262,13 +246,43 @@ def parse_badger5_rows(draws: List[Dict[str, Any]]) -> List[List[Any]]:
     rows.sort(key=lambda r: (r[0] or ""), reverse=True)
     return rows
 
+def col_letter(n: int) -> str:
+    """1 -> A, 2 -> B ..."""
+    s = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s or "A"
+
 def write_rows(ws, headers: List[str], rows: List[List[Any]], game_label: str):
-    ws.clear()
-    ws.update("A1", [headers])
+    # Try to write headers; if protected, skip
+    try:
+        ws.update(values=[headers], range_name="A1")
+    except APIError:
+        pass  # header row likely protected
+
+    # Determine write range for body
+    ncols = len(headers)
+    max_rows = max(len(rows), 0)
+    end_col = col_letter(ncols)
+
+    # First: write the actual data
     if rows:
-        ws.update("A2", rows, value_input_option="RAW")
+        ws.update(values=rows, range_name=f"A2:{end_col}{max_rows+1}")
     else:
-        ws.update("A2", [["", "", "", f"No draws found for {game_label}"]])
+        # Write a minimal note in the first row of the body
+        note = [[ "", "", "", f"No draws found for {game_label}"]]  # fits tabs with >=4 cols
+        ws.update(values=note, range_name="A2")
+
+    # Second: attempt to "blank out" any leftover old rows within a safe window
+    # (We blank up to +200 extra rows to clean previous content without clearing protected ranges.)
+    BLANK_PAD = 200
+    blank_rows = [["" for _ in range(ncols)] for __ in range(BLANK_PAD)]
+    try:
+        ws.update(values=blank_rows, range_name=f"A{max_rows+2}:{end_col}{max_rows+1+BLANK_PAD}")
+    except APIError:
+        # If some of those cells are protected, ignore
+        pass
 
 def write_games_index(ws_index: gspread.Worksheet, games: List[Dict[str, Any]]) -> None:
     headers = ["#", "game_id", "game_name"]
@@ -277,13 +291,12 @@ def write_games_index(ws_index: gspread.Worksheet, games: List[Dict[str, Any]]) 
         gid = as_str(g.get("id", ""))
         name = as_str(g.get("name", ""))
         rows.append([i, gid, name])
-    ws_index.clear()
-    ws_index.update("A1", [headers])
-    ws_index.update("A2", rows or [["", "", "No games found"]], value_input_option="RAW")
+    try:
+        ws_index.update(values=[headers], range_name="A1")
+    except APIError:
+        pass
+    ws_index.update(values=(rows or [["", "", "No games found"]]), range_name="A2")
 
-# -------------------------
-# Main
-# -------------------------
 def main():
     sheet_name, rapid_key, client, sa_email = load_runtime_config()
     ss = open_sheet(client, sheet_name)
@@ -298,14 +311,13 @@ def main():
     write_raw_api(ws_raw, data)
 
     games_list = detect_games_list(data) or []
+
     write_games_index(ws_index, games_list)
 
-    # Build a quick lookup by name/id
     def game_contains(g: Dict[str, Any], needle: str) -> bool:
         s = (as_str(g.get("name")) + " " + as_str(g.get("id")) + " " + as_str(g.get("title"))).lower()
         return needle.lower() in s
 
-    # Parse and write each tab
     targets = [
         ("Powerball_Results", parse_powerball_rows, "powerball"),
         ("Megabucks_Results", parse_megabucks_rows, "megabucks"),
@@ -317,7 +329,6 @@ def main():
         ws = get_or_create_worksheet(ss, tab_name, rows=2000, cols=len(TABS_SCHEMA[tab_name]))
         headers = TABS_SCHEMA[tab_name]
 
-        # find the matching game in the API list
         matched = None
         for g in games_list:
             if game_contains(g, key):
@@ -335,12 +346,9 @@ def main():
             rows = [[ "", "", "", f"Parser error: {e}" ]]
         write_rows(ws, headers, rows, tab_name.replace("_Results",""))
 
-    # Console summary
-    print("Success! Results updated in existing tabs:")
-    for t in TABS_SCHEMA.keys():
-        print(f" - {t}")
+    print("Success! Results updated in existing tabs (protection-safe).")
     if sa_email:
-        print(f"(Ensure the sheet is shared with: {sa_email})")
+        print(f"(If nothing changed, check range protection: add editor permission for {sa_email}.)")
 
 if __name__ == "__main__":
     main()
