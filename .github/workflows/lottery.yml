@@ -32,13 +32,14 @@ jobs:
           # --- required secrets ---
           GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
           RAPID_API_KEY:     ${{ secrets.RAPID_API_KEY }}
-
+       
           # --- optional sheet name override (if you changed it) ---
           SHEET_NAME:        ${{ vars.SHEET_NAME }}
 
           # --- core controls ---
           ENABLE_PREDICTIONS: "1"
-
+          ENABLE_BASELINE: "0"   # ← set "0" to hide baseline, "1" to include it
+          
           # --- per-game totals (use your repo Variables) ---
           PREDICTIONS_POWERBALL:  ${{ vars.PREDICTIONS_POWERBALL }}
           PREDICTIONS_MEGABUCKS:  ${{ vars.PREDICTIONS_MEGABUCKS }}
