@@ -1,13 +1,16 @@
+#!/usr/bin/env python3
 """
-main.py — v4.2.1 (stability & typing fixes)
-- Fixes mixed-up ordering/typing by normalizing dates & numbers when reading existing rows.
-- Sorts by a real date key (handles both "MM/DD/YYYY" and "YYYY-MM-DD"), newest first.
-- Removes extra blank padding writes (reduced Sheet reformatting).
-- Keeps per‑game totals, adaptive allocation, optional LLM method (single API call).
+main.py — v4.2.2 (fix Sheets 429s)
+- Same as v4.2.1 PLUS: fixes excessive read calls that triggered Google Sheets 429 rate limits.
+- We now use the header from a single get_all_values() call (no repeated row_values() per row).
 
-ENV: same as v4.2
+Other retained fixes:
+- Normalize dates & numbers on read
+- Sort by parsed date (newest first)
+- Per-game totals + adaptive allocation (no cap per method)
+- Optional LLM method (one API call); variants via mutation
 """
-import os, json, datetime as dt, re, random
+import os, json, datetime as dt, re, random, time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -74,41 +77,32 @@ def write_raw(ws_raw, data:Dict[str,Any]):
     pretty = json.dumps(data, indent=2, ensure_ascii=False).splitlines()
     try: ws_raw.update(values=[["Raw JSON (pretty)"]], range_name="A1")
     except APIError: pass
-    # Cap to avoid huge payloads
     max_rows = 5000
     ws_raw.update(values=[[ln] for ln in pretty[:max_rows]], range_name="A2")
 
 # ---- Date helpers ----
 def normalize_date(s: Any) -> str:
-    """Return ISO YYYY-MM-DD if recognized; otherwise original string trimmed."""
     s = "" if s is None else str(s).strip()
     if not s: return ""
-    # MM/DD/YYYY
     m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", s)
     if m:
         mm,dd,yy = m.groups()
-        try:
-            return f"{int(yy):04d}-{int(mm):02d}-{int(dd):02d}"
-        except:
-            return s
-    # YYYY-MM-DD or starts with it
+        try: return f"{int(yy):04d}-{int(mm):02d}-{int(dd):02d}"
+        except: return s
     m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", s)
     if m: return s[:10]
     return s
 
 def date_key(s: Any) -> Tuple[int,int,int,int]:
-    """Sort key: (year,month,day,neg_len) so valid ISO outranks weird strings; newest first elsewhere handled by reverse=True."""
     ss = normalize_date(s)
     m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", ss)
     if m:
         y,mn,d = m.groups()
         return (int(y), int(mn), int(d), -10)
-    # Try MM/DD/YYYY as a fallback
     m2 = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", str(s).strip())
     if m2:
         mm,dd,y = m2.groups()
         return (int(y), int(mm), int(dd), -9)
-    # Push unknowns to bottom
     return (0,0,0,-100)
 
 def to_int(v)->Optional[int]:
@@ -169,17 +163,14 @@ def col_letter(n:int)->str:
 
 # ---- Read/Write tables with normalization ----
 def coerce_row_types(ws_title:str, headers: List[str], row: List[Any]) -> List[Any]:
-    """Normalize a single existing row coming from get_all_values()."""
     out = list(row) + [""]*(len(headers)-len(row))
-    # date
     out[0] = normalize_date(out[0])
-    # numbers
     if ws_title=="Powerball_Results":
-        idxs = [1,2,3,4,5,6]  # N1..N5, PB
+        idxs = [1,2,3,4,5,6]
     elif ws_title=="Megabucks_Results":
         idxs = [1,2,3,4,5,6]
     elif ws_title=="SuperCash_Results":
-        idxs = [1,2,3,4,5,6]  # Doubler left as string
+        idxs = [1,2,3,4,5,6]
     elif ws_title=="Badger5_Results":
         idxs = [1,2,3,4,5]
     else:
@@ -190,8 +181,9 @@ def coerce_row_types(ws_title:str, headers: List[str], row: List[Any]) -> List[A
 
 def read_existing(ws, ws_title:str, expected_cols:int) -> List[List[Any]]:
     vals = ws.get_all_values()
+    header = vals[0][:expected_cols] if vals else [""]*expected_cols
     body = vals[1:] if len(vals)>=2 else []
-    fixed = [coerce_row_types(ws_title, ws.row_values(1)[:expected_cols] or [""]*expected_cols, r) for r in body]
+    fixed = [coerce_row_types(ws_title, header, r) for r in body]
     return fixed
 
 def write_table(ws, headers: List[str], rows: List[List[Any]]):
@@ -213,7 +205,7 @@ def merge_by_date(existing: List[List[Any]], new_rows: List[List[Any]], date_idx
         if key and key not in m:
             m[key] = r
     rows = list(m.values())
-    rows.sort(key=lambda r: date_key(r[date_idx]), reverse=True)  # newest first
+    rows.sort(key=lambda r: date_key(r[date_idx]), reverse=True)
     return rows
 
 # ---- Builders per game ----
@@ -615,7 +607,6 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
         end_col = col_letter(len(TRACKER_COLS))
         ws.update(values=new_rows, range_name=f"A{start_row}:{end_col}{end_row}")
 
-    # Game ranges
     if game=="Powerball":
         need, lo, hi = 5, 1, 69
     elif game=="Megabucks":
@@ -627,17 +618,14 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
     else:
         return
 
-    # Base: one per method
     methods: Dict[str, Tuple[List[int], Optional[int]]] = {}
     methods["last_draw_baseline"] = (rows_hist[0][1:1+need] if rows_hist else [], None)
     methods["freq50"] = (freq_method(rows_hist, need, lo, hi, window=50), None)
     methods["recency"] = (recency_method(rows_hist, need, lo, hi, decay=0.92), None)
     methods["markov1"] = (markov1_method(rows_hist, need, lo, hi), None)
 
-    # PB for non-LLM
     special_pb = pick_powerball(rows_hist) if game=="Powerball" else None
 
-    # Optional LLM
     mains_llm, special_llm = llm_pick_numbers(game, rows_hist)
     if mains_llm:
         methods["llm_gpt"] = (mains_llm, special_llm if game=="Powerball" else None)
@@ -659,12 +647,10 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
         written_preds.add(pred_str)
         return True
 
-    # Pass 1: one per method
     for md in enabled_methods:
         nums, sp = methods[md]
         emit(md, nums, sp)
 
-    # Pass 2: extra variants by weights (no cap per method)
     extra = max(0, total_target - len(to_write))
     if extra > 0:
         weights = adaptive_weights(ss, game)
@@ -737,13 +723,11 @@ def main():
     merged_sc, next_sc = merge_and_write("Super Cash", "SuperCash_Results", 6, sc_rows_from_draws)
     merged_b5, next_b5 = merge_and_write("Badger 5",   "Badger5_Results",   5, b5_rows_from_draws)
 
-    # Index for visibility
     idx_rows = [[i+1, str(g.get("code","")), str(g.get("name",""))] for i,g in enumerate(games)]
     try: ws_index.update(values=[["#", "game_code", "game_name"]], range_name="A1")
     except APIError: pass
     ws_index.update(values=(idx_rows or [["", "", "No games"]]), range_name="A2")
 
-    # Run log
     runlog = read_runlog(ss)
 
     results = [
@@ -760,7 +744,6 @@ def main():
         rl = runlog.get(game_label, {"LastResultDate":"", "LastPredictedNextDraw":""})
         prev = normalize_date(rl.get("LastResultDate",""))
         is_new = (latest_date != prev)
-        # Debug print to actions log
         print(f"[{game_label}] latest_date={latest_date} prev={prev} is_new={is_new}")
         if is_new:
             evaluate_pending_predictions(ss, game_label, merged_rows[0])
@@ -768,7 +751,7 @@ def main():
             runlog[game_label] = {"LastResultDate": latest_date, "LastPredictedNextDraw": normalize_date(next_draw or "")}
 
     write_runlog(ss, runlog)
-    print("Success! v4.2.1 ran: normalized rows, merged results, scored pending predictions on new results, and generated predictions per per-game totals.")
+    print("Success! v4.2.2 ran: minimized read calls, normalized rows, merged results, scored pending predictions, and generated predictions.")
     
 if __name__ == "__main__":
     main()
