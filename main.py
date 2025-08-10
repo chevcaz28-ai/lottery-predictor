@@ -619,7 +619,8 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
         return
 
     methods: Dict[str, Tuple[List[int], Optional[int]]] = {}
-    methods["last_draw_baseline"] = (rows_hist[0][1:1+need] if rows_hist else [], None)
+    if os.getenv("ENABLE_BASELINE","1") in ("1","true","True","YES","yes"):
+        methods["last_draw_baseline"] = (rows_hist[0][1:1+need] if rows_hist else [], None)
     methods["freq50"] = (freq_method(rows_hist, need, lo, hi, window=50), None)
     methods["recency"] = (recency_method(rows_hist, need, lo, hi, decay=0.92), None)
     methods["markov1"] = (markov1_method(rows_hist, need, lo, hi), None)
