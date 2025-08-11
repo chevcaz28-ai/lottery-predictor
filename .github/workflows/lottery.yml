@@ -2,7 +2,7 @@ name: Lottery Automation
 
 on:
   schedule:
-    - cron: "0 8 * * *"   # runs daily at 08:00 UTC
+    - cron: "0 8 * * *"   # runs daily at 08:00 UTC (3:00 AM Central during CDT)
   workflow_dispatch:
 
 jobs:
@@ -27,20 +27,42 @@ jobs:
           pip install gspread google-auth requests
           pip install --upgrade openai
 
+      # --- Debug: confirm per-game totals & other vars are reaching the runner ---
+      # Remove this step after you confirm values print correctly.
+      - name: Debug totals (safe to print)
+        env:
+          PREDICTIONS_SUPERCASH: ${{ vars.PREDICTIONS_SUPERCASH }}
+          PREDICTIONS_BADGER5:   ${{ vars.PREDICTIONS_BADGER5 }}
+          PREDICTIONS_POWERBALL: ${{ vars.PREDICTIONS_POWERBALL }}
+          PREDICTIONS_MEGABUCKS: ${{ vars.PREDICTIONS_MEGABUCKS }}
+          PREDICTIONS_PER_GAME:  ${{ vars.PREDICTIONS_PER_GAME }}
+          SHEET_NAME:            ${{ vars.SHEET_NAME }}
+          ENABLE_LLM_METHOD:     ${{ vars.ENABLE_LLM_METHOD }}
+          OPENAI_MODEL:          ${{ vars.OPENAI_MODEL }}
+        run: |
+          echo "PREDICTIONS_SUPERCASH=${PREDICTIONS_SUPERCASH}"
+          echo "PREDICTIONS_BADGER5=${PREDICTIONS_BADGER5}"
+          echo "PREDICTIONS_POWERBALL=${PREDICTIONS_POWERBALL}"
+          echo "PREDICTIONS_MEGABUCKS=${PREDICTIONS_MEGABUCKS}"
+          echo "PREDICTIONS_PER_GAME=${PREDICTIONS_PER_GAME}"
+          echo "SHEET_NAME=${SHEET_NAME}"
+          echo "ENABLE_LLM_METHOD=${ENABLE_LLM_METHOD}"
+          echo "OPENAI_MODEL=${OPENAI_MODEL}"
+
       - name: Run script
         env:
           # --- required secrets ---
           GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
           RAPID_API_KEY:     ${{ secrets.RAPID_API_KEY }}
-       
-          # --- optional sheet name override (if you changed it) ---
+
+          # --- optional sheet name override ---
           SHEET_NAME:        ${{ vars.SHEET_NAME }}
 
           # --- core controls ---
           ENABLE_PREDICTIONS: "1"
-          ENABLE_BASELINE: "0"   # ← set "0" to hide baseline, "1" to include it
-          
-          # --- per-game totals (use your repo Variables) ---
+          ENABLE_BASELINE: "0"   # set "0" to hide baseline, "1" to include it
+
+          # --- per-game totals (repo Variables) ---
           PREDICTIONS_POWERBALL:  ${{ vars.PREDICTIONS_POWERBALL }}
           PREDICTIONS_MEGABUCKS:  ${{ vars.PREDICTIONS_MEGABUCKS }}
           PREDICTIONS_SUPERCASH:  ${{ vars.PREDICTIONS_SUPERCASH }}
