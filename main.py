@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-main.py — v4.2.2 (fix Sheets 429s)
-- Same as v4.2.1 PLUS: fixes excessive read calls that triggered Google Sheets 429 rate limits.
-- We now use the header from a single get_all_values() call (no repeated row_values() per row).
-
-Other retained fixes:
-- Normalize dates & numbers on read
-- Sort by parsed date (newest first)
-- Per-game totals + adaptive allocation (no cap per method)
-- Optional LLM method (one API call); variants via mutation
+main.py — v4.2.3
+- Adds ENABLE_BASELINE gate (hide/show last_draw_baseline).
+- Prints clear debug lines per game: env targets, enabled methods, target_total, emitted counts.
+- Stronger extra-fill: if weighted allocation stalls (e.g., empty LLM base), a fallback loop
+  mutates any non-empty base method to reach the target count.
+- Keeps prior fixes:
+  * Single-pass header read (avoid Sheets 429)
+  * Normalize dates & numbers on read; sort by real date (newest first)
+  * Per-game totals + adaptive allocation (no cap per method)
+  * Optional LLM (one API call); variants by mutation
 """
-import os, json, datetime as dt, re, random, time
+import os, json, datetime as dt, re, random
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -249,7 +250,7 @@ def b5_rows_from_draws(draws: List[Dict[str,Any]]) -> List[List[Any]]:
     out.sort(key=lambda r: date_key(r[0]), reverse=True)
     return out
 
-# ---- Methods (non-LLM) ----
+# ---- Methods (non‑LLM) ----
 def unique_combo(nums: List[int], need:int, lo:int, hi:int) -> List[int]:
     s = sorted(set(n for n in nums if isinstance(n,int) and lo<=n<=hi))
     while len(s) < need:
@@ -383,57 +384,6 @@ def write_runlog(ss, db):
     for gm,info in db.items():
         rows.append([gm, normalize_date(info.get("LastResultDate","")), normalize_date(info.get("LastPredictedNextDraw",""))])
     ws.update(values=rows, range_name="A1")
-
-# ---- Evaluate pending predictions ----
-def evaluate_pending_predictions(ss, game:str, latest_row: List[Any]):
-    ws = get_or_create_worksheet(ss, "Prediction_Tracker", rows=20000, cols=len(TRACKER_COLS))
-    try: ws.update(values=[TRACKER_COLS], range_name="A1")
-    except APIError: pass
-
-    all_vals = ws.get_all_values()
-    if not all_vals: return
-    header = all_vals[0]; rows = all_vals[1:]
-    col_idx = {name:i for i,name in enumerate(header)}
-
-    if game=="Powerball":
-        latest_mains = [int(x) for x in latest_row[1:6] if str(x).isdigit()]
-    elif game=="Megabucks":
-        latest_mains = [int(x) for x in latest_row[1:7] if str(x).isdigit()]
-    elif game=="Super Cash":
-        latest_mains = [int(x) for x in latest_row[1:7] if str(x).isdigit()]
-    elif game=="Badger 5":
-        latest_mains = [int(x) for x in latest_row[1:6] if str(x).isdigit()]
-    else:
-        latest_mains = []
-
-    updates = []
-    for i, r in enumerate(rows, start=2):
-        try:
-            gm = r[col_idx["Game"]].strip()
-        except: 
-            continue
-        if gm != game: 
-            continue
-        matches = r[col_idx["Matches"]].strip() if len(r)>col_idx["Matches"] else ""
-        if matches != "":
-            continue
-        pred_str = r[col_idx["Prediction"]]
-        pred_nums, _ = parse_prediction_to_nums(game, pred_str)
-        inter, cnt = intersect_count(pred_nums, latest_mains)
-        win = 1 if (game=="Powerball" and cnt==5) or \
-                  (game=="Megabucks" and cnt==6) or \
-                  (game=="Super Cash" and cnt==6) or \
-                  (game=="Badger 5" and cnt==5) else 0
-        updates.append((i, {"Win Count": str(win), "Matches": ",".join(str(x) for x in inter), "Match Count": str(cnt)}))
-    if updates:
-        mod_rows = [list(r) + [""]*(len(TRACKER_COLS)-len(r)) for r in rows]
-        for i, changes in updates:
-            ridx = i-2
-            for k,v in changes.items():
-                c = col_idx[k]
-                mod_rows[ridx][c] = v
-        end_col = col_letter(len(TRACKER_COLS))
-        ws.update(values=mod_rows, range_name=f"A2:{end_col}{len(mod_rows)+1}")
 
 # ---- Adaptive weights ----
 def adaptive_weights(ss, game:str) -> Dict[str,float]:
@@ -607,6 +557,7 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
         end_col = col_letter(len(TRACKER_COLS))
         ws.update(values=new_rows, range_name=f"A{start_row}:{end_col}{end_row}")
 
+    # Game ranges
     if game=="Powerball":
         need, lo, hi = 5, 1, 69
     elif game=="Megabucks":
@@ -618,6 +569,7 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
     else:
         return
 
+    # Base picks (one per enabled method)
     methods: Dict[str, Tuple[List[int], Optional[int]]] = {}
     if os.getenv("ENABLE_BASELINE","1") in ("1","true","True","YES","yes"):
         methods["last_draw_baseline"] = (rows_hist[0][1:1+need] if rows_hist else [], None)
@@ -628,7 +580,8 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
     special_pb = pick_powerball(rows_hist) if game=="Powerball" else None
 
     mains_llm, special_llm = llm_pick_numbers(game, rows_hist)
-    if mains_llm:
+    llm_ok = bool(mains_llm)
+    if llm_ok:
         methods["llm_gpt"] = (mains_llm, special_llm if game=="Powerball" else None)
 
     enabled_methods = list(methods.keys())
@@ -648,10 +601,22 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
         written_preds.add(pred_str)
         return True
 
+    # Pass 1: one per method
     for md in enabled_methods:
         nums, sp = methods[md]
         emit(md, nums, sp)
 
+    # Debug env & target
+    env_name = {
+        "Powerball": "PREDICTIONS_POWERBALL",
+        "Megabucks": "PREDICTIONS_MEGABUCKS",
+        "Super Cash":"PREDICTIONS_SUPERCASH",
+        "Badger 5":  "PREDICTIONS_BADGER5",
+    }[game]
+    print(f"[{game}] env {env_name}={os.getenv(env_name)} global PREDICTIONS_PER_GAME={os.getenv('PREDICTIONS_PER_GAME')} ENABLE_BASELINE={os.getenv('ENABLE_BASELINE')} LLM_OK={llm_ok}")
+    print(f"[{game}] enabled_methods={enabled_methods} target_total={total_target} emitted_base={len(to_write)}")
+
+    # Pass 2: extra variants by weights (no cap per method)
     extra = max(0, total_target - len(to_write))
     if extra > 0:
         weights = adaptive_weights(ss, game)
@@ -669,22 +634,39 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
             for k,v in w.items():
                 cum += v
                 if r <= cum: return k
+            # fallback to first key
             return next(iter(w))
 
         base_cache = {md: list(methods[md][0]) for md in enabled_methods}
         base_sp    = {md: (methods[md][1] if md=="llm_gpt" else None) for md in enabled_methods}
         tries = 0
-        while extra > 0 and tries < 400:
+        max_tries = 600
+        while extra > 0 and tries < max_tries:
             tries += 1
             md = weighted_pick(weights)
             base_nums = base_cache.get(md, [])
-            if not base_nums: 
+            if not base_nums:
                 continue
             variant = mutate(base_nums, lo, hi)
             sp = base_sp.get(md, None)
             if emit(md, variant, sp):
                 extra -= 1
 
+        # Fallback: round-robin over any non-empty base until we reach target or hit a safety cap
+        if extra > 0:
+            non_empty = [m for m,n in base_cache.items() if n]
+            rr = 0
+            safety = 0
+            while extra > 0 and non_empty and safety < 800:
+                safety += 1
+                md = non_empty[rr % len(non_empty)]
+                rr += 1
+                variant = mutate(base_cache[md], lo, hi)
+                sp = base_sp.get(md, None)
+                if emit(md, variant, sp):
+                    extra -= 1
+
+    print(f"[{game}] wrote {len(to_write)} rows (target_total={total_target})")
     append_rows(to_write)
 
 # ---- Main orchestrator ----
@@ -752,7 +734,7 @@ def main():
             runlog[game_label] = {"LastResultDate": latest_date, "LastPredictedNextDraw": normalize_date(next_draw or "")}
 
     write_runlog(ss, runlog)
-    print("Success! v4.2.2 ran: minimized read calls, normalized rows, merged results, scored pending predictions, and generated predictions.")
+    print("Success! v4.2.3 finished.")
     
 if __name__ == "__main__":
     main()
