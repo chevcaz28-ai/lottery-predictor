@@ -479,8 +479,7 @@ def llm_pick_numbers(game:str, rows_hist: List[List[Any]]) -> Tuple[List[int], O
         elif game=="Badger 5":
             nums = [r[1],r[2],r[3],r[4],r[5]]
             hist_lines.append(f"{date}: {nums}")
-    hist_text = "
-".join(hist_lines)
+hist_text = "\n".join(hist_lines)
 
     system = (
         "You generate lottery number-set predictions strictly in the required ranges. "
