@@ -1,11 +1,11 @@
-#!/usr/bin/env python3
-"""
-main.py — v4.2.4
-- FIX: restore missing evaluate_pending_predictions() (v4.2.3 NameError).
-- Keeps: 429-safe reads, date/number normalization, ENABLE_BASELINE gate,
-  per-game debug lines, stronger extra-fill to hit per-game targets,
-  adaptive weighting, optional LLM (single call).
-"""
+'''
+main.py — v4.2.5
+- GUARANTEE totals: if weighted + fallback variants don't reach target,
+  a final "fresh random" filler generates unique combos until target is met.
+- Extra debug: print computed numeric targets and whether filler was used.
+- Keeps: 429-safe reads, normalization, ENABLE_BASELINE gate, adaptive weighting,
+  optional LLM (single call), and evaluate_pending_predictions.
+'''
 import os, json, datetime as dt, re, random
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -380,9 +380,8 @@ def write_runlog(ss, db):
         rows.append([gm, normalize_date(info.get("LastResultDate","")), normalize_date(info.get("LastPredictedNextDraw",""))])
     ws.update(values=rows, range_name="A1")
 
-# ---- Evaluate pending predictions (RESTORED) ----
+# ---- Evaluate pending predictions ----
 def evaluate_pending_predictions(ss, game:str, latest_row: List[Any]):
-    """Score predictions with empty Matches/Win Count for this game against latest result."""
     ws = get_or_create_worksheet(ss, "Prediction_Tracker", rows=20000, cols=len(TRACKER_COLS))
     try: ws.update(values=[TRACKER_COLS], range_name="A1")
     except APIError: pass
@@ -417,10 +416,7 @@ def evaluate_pending_predictions(ss, game:str, latest_row: List[Any]):
         pred_str = r[col_idx["Prediction"]]
         pred_nums, _ = parse_prediction_to_nums(game, pred_str)
         inter, cnt = intersect_count(pred_nums, latest_mains)
-        win = 1 if (game=="Powerball" and cnt==5) or \
-                  (game=="Megabucks" and cnt==6) or \
-                  (game=="Super Cash" and cnt==6) or \
-                  (game=="Badger 5" and cnt==5) else 0
+        win = 1 if (game=="Powerball" and cnt==5) or                   (game=="Megabucks" and cnt==6) or                   (game=="Super Cash" and cnt==6) or                   (game=="Badger 5" and cnt==5) else 0
         updates.append((i, {"Win Count": str(win), "Matches": ",".join(str(x) for x in inter), "Match Count": str(cnt)}))
     if updates:
         mod_rows = [list(r) + [""]*(len(TRACKER_COLS)-len(r)) for r in rows]
@@ -483,11 +479,12 @@ def llm_pick_numbers(game:str, rows_hist: List[List[Any]]) -> Tuple[List[int], O
         elif game=="Badger 5":
             nums = [r[1],r[2],r[3],r[4],r[5]]
             hist_lines.append(f"{date}: {nums}")
-    hist_text = "\n".join(hist_lines)
+    hist_text = "
+".join(hist_lines)
 
     system = (
         "You generate lottery number-set predictions strictly in the required ranges. "
-        "Return only JSON like {\"mains\":[...],\"special\":<int or null>} with no extra text."
+        "Return only JSON like {"mains":[...],"special":<int or null>} with no extra text."
     )
 
     if game=="Powerball":
@@ -505,7 +502,7 @@ def llm_pick_numbers(game:str, rows_hist: List[List[Any]]) -> Tuple[List[int], O
         f"Game: {game}\n"
         f"Rules: {rule}\n"
         f"Recent results (newest first):\n{hist_text}\n"
-        "Respond ONLY with JSON: {\"mains\":[int,...],\"special\":null or int}"
+        "Respond ONLY with JSON: {"mains":[int,...],"special":null or int}"
     )
 
     mains, special = [], None
@@ -570,6 +567,14 @@ def llm_pick_numbers(game:str, rows_hist: List[List[Any]]) -> Tuple[List[int], O
     return mains, special
 
 # ---- Per‑game totals ----
+def safe_int(s: Optional[str]) -> Optional[int]:
+    if s is None: return None
+    ss = str(s).strip()
+    if ss.isdigit(): return int(ss)
+    m = re.match(r"^\s*(\d+)", ss)
+    if m: return int(m.group(1))
+    return None
+
 def target_total_for_game(game:str, enabled_method_count:int) -> int:
     mapping = {
         "Powerball":  os.getenv("PREDICTIONS_POWERBALL"),
@@ -577,12 +582,13 @@ def target_total_for_game(game:str, enabled_method_count:int) -> int:
         "Super Cash": os.getenv("PREDICTIONS_SUPERCASH"),
         "Badger 5":   os.getenv("PREDICTIONS_BADGER5"),
     }
-    specific = mapping.get(game)
-    if specific and str(specific).strip().isdigit():
-        return max(int(str(specific).strip()), enabled_method_count)
-    global_default = os.getenv("PREDICTIONS_PER_GAME")
-    if global_default and str(global_default).strip().isdigit():
-        return max(int(str(global_default).strip()), enabled_method_count)
+    specific_raw = mapping.get(game)
+    specific = safe_int(specific_raw)
+    global_default = safe_int(os.getenv("PREDICTIONS_PER_GAME"))
+    if specific is not None:
+        return max(specific, enabled_method_count)
+    if global_default is not None:
+        return max(global_default, enabled_method_count)
     return enabled_method_count
 
 # ---- Write predictions ----
@@ -712,6 +718,22 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
                 if emit(md, variant, sp):
                     extra -= 1
 
+        # Final filler: purely random unique combos to guarantee hitting target
+        if extra > 0:
+            print(f"[{game}] activating final filler: remaining={extra}")
+            def fresh_combo(need:int, lo:int, hi:int)->List[int]:
+                s = set()
+                while len(s) < need:
+                    s.add(random.randint(lo, hi))
+                return sorted(s)
+
+            safety2 = 0
+            while extra > 0 and safety2 < 2000:
+                safety2 += 1
+                nums = fresh_combo(need, lo, hi)
+                if emit("filler_random", nums, None):
+                    extra -= 1
+
     print(f"[{game}] wrote {len(to_write)} rows (target_total={total_target})")
     append_rows(to_write)
 
@@ -780,7 +802,7 @@ def main():
             runlog[game_label] = {"LastResultDate": latest_date, "LastPredictedNextDraw": normalize_date(next_draw or "")}
 
     write_runlog(ss, runlog)
-    print("Success! v4.2.4 finished.")
+    print("Success! v4.2.5 finished.")
     
 if __name__ == "__main__":
     main()
