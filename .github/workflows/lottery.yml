@@ -2,19 +2,23 @@ name: Lottery Automation
 
 on:
   schedule:
-    - cron: "0 8 * * *"   # runs daily at 08:00 UTC (3:00 AM Central during CDT)
+    - cron: "0 8 * * *"   # runs daily at 08:00 UTC (02:00/03:00 Central depending on DST)
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lottery-automation
+  cancel-in-progress: false
 
 jobs:
   run-lottery:
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: read
-
     steps:
       - name: Check out repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -24,54 +28,49 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install gspread google-auth requests
-          pip install --upgrade openai
+          pip install gspread google-auth requests openai
 
-      # --- Debug: confirm per-game totals & other vars are reaching the runner ---
-      # Remove this step after you confirm values print correctly.
-      - name: Debug totals (safe to print)
-        env:
-          PREDICTIONS_SUPERCASH: ${{ vars.PREDICTIONS_SUPERCASH }}
-          PREDICTIONS_BADGER5:   ${{ vars.PREDICTIONS_BADGER5 }}
-          PREDICTIONS_POWERBALL: ${{ vars.PREDICTIONS_POWERBALL }}
-          PREDICTIONS_MEGABUCKS: ${{ vars.PREDICTIONS_MEGABUCKS }}
-          PREDICTIONS_PER_GAME:  ${{ vars.PREDICTIONS_PER_GAME }}
-          SHEET_NAME:            ${{ vars.SHEET_NAME }}
-          ENABLE_LLM_METHOD:     ${{ vars.ENABLE_LLM_METHOD }}
-          OPENAI_MODEL:          ${{ vars.OPENAI_MODEL }}
+      # Optional: echo non-secret config so you can confirm your targets
+      - name: Echo config
         run: |
-          echo "PREDICTIONS_SUPERCASH=${PREDICTIONS_SUPERCASH}"
-          echo "PREDICTIONS_BADGER5=${PREDICTIONS_BADGER5}"
-          echo "PREDICTIONS_POWERBALL=${PREDICTIONS_POWERBALL}"
-          echo "PREDICTIONS_MEGABUCKS=${PREDICTIONS_MEGABUCKS}"
-          echo "PREDICTIONS_PER_GAME=${PREDICTIONS_PER_GAME}"
-          echo "SHEET_NAME=${SHEET_NAME}"
-          echo "ENABLE_LLM_METHOD=${ENABLE_LLM_METHOD}"
-          echo "OPENAI_MODEL=${OPENAI_MODEL}"
+          echo "SHEET_NAME=${{ vars.SHEET_NAME }}"
+          echo "PREDICTIONS_POWERBALL=${{ vars.PREDICTIONS_POWERBALL }}"
+          echo "PREDICTIONS_MEGABUCKS=${{ vars.PREDICTIONS_MEGABUCKS }}"
+          echo "PREDICTIONS_SUPERCASH=${{ vars.PREDICTIONS_SUPERCASH }}"
+          echo "PREDICTIONS_BADGER5=${{ vars.PREDICTIONS_BADGER5 }}"
+          echo "PREDICTIONS_PER_GAME=${{ vars.PREDICTIONS_PER_GAME }}"
+          echo "ENABLE_LLM_METHOD=${{ vars.ENABLE_LLM_METHOD }}"
+          echo "OPENAI_MODEL=${{ vars.OPENAI_MODEL }}"
+          echo "FORCE_PREDICT_TODAY=${{ vars.FORCE_PREDICT_TODAY }}"
 
       - name: Run script
         env:
-          # --- required secrets ---
+          # Required secrets
           GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
           RAPID_API_KEY:     ${{ secrets.RAPID_API_KEY }}
+          # Optional: for LLM predictions (only used if ENABLE_LLM_METHOD=1)
+          OPENAI_API_KEY:    ${{ secrets.OPENAI_API_KEY }}
 
-          # --- optional sheet name override ---
+          # Optional sheet override
           SHEET_NAME:        ${{ vars.SHEET_NAME }}
 
-          # --- core controls ---
+          # Core controls
           ENABLE_PREDICTIONS: "1"
-          ENABLE_BASELINE: "0"   # set "0" to hide baseline, "1" to include it
+          ENABLE_BASELINE: "0"           # "0" to hide baseline, "1" to include it
 
-          # --- per-game totals (repo Variables) ---
+          # Per-game totals (repo "Variables")
           PREDICTIONS_POWERBALL:  ${{ vars.PREDICTIONS_POWERBALL }}
           PREDICTIONS_MEGABUCKS:  ${{ vars.PREDICTIONS_MEGABUCKS }}
           PREDICTIONS_SUPERCASH:  ${{ vars.PREDICTIONS_SUPERCASH }}
           PREDICTIONS_BADGER5:    ${{ vars.PREDICTIONS_BADGER5 }}
-          # optional global fallback if any of the above aren't set
+          # Fallback global default if any of the above are missing
           PREDICTIONS_PER_GAME:   ${{ vars.PREDICTIONS_PER_GAME }}
 
-          # --- LLM method (optional) ---
+          # LLM method toggle/model
           ENABLE_LLM_METHOD:  ${{ vars.ENABLE_LLM_METHOD }}   # "1" or "0"
-          OPENAI_API_KEY:     ${{ secrets.OPENAI_API_KEY }}    # needed only if enabled
-          OPENAI_MODEL:       ${{ vars.OPENAI_MODEL }}         # e.g., gpt-4o-mini
-        run: python main.py
+          OPENAI_MODEL:       ${{ vars.OPENAI_MODEL }}        # e.g., gpt-4o-mini
+
+          # Manual forcing of predictions (for ad-hoc tests / pre-draw runs)
+          FORCE_PREDICT_TODAY: ${{ vars.FORCE_PREDICT_TODAY }}  # "0" normally; set "1" to force
+        run: |
+          python -u main.py
