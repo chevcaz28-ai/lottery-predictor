@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 '''
-main.py — v4.2.6
-- Fix: corrected quoting that could break around `hist_text = "\n".join(...)` in some copy/paste cases.
-- Guarantee totals with final filler; clearer debug logs; adaptive weighting; optional LLM; Run_Log gating.
+main.py — v4.2.7
+- Enforce per‑day totals per game: if today already has K predictions, only emit (target-K) more.
+- Dedup by prediction string (not method) across same day + game.
+- Keep final filler to *guarantee* reaching the requested count.
+- Extra debug: show existing_today_count, remaining_to_emit, and whether filler triggered.
+- Keeps prior fixes: normalization, merge mode, adaptive weights, optional LLM, Run_Log gating.
 '''
 import os, json, datetime as dt, re, random
 from typing import Any, Dict, List, Optional, Tuple
@@ -480,7 +483,7 @@ def llm_pick_numbers(game:str, rows_hist: List[List[Any]]) -> Tuple[List[int], O
         elif game=="Badger 5":
             nums = [r[1],r[2],r[3],r[4],r[5]]
             hist_lines.append(f"{date}: {nums}")
-    hist_text = "\\n".join(hist_lines)
+    hist_text = "\n".join(hist_lines)
 
     system = (
         "You generate lottery number-set predictions strictly in the required ranges. "
@@ -499,9 +502,9 @@ def llm_pick_numbers(game:str, rows_hist: List[List[Any]]) -> Tuple[List[int], O
         return [], None
 
     user = (
-        f"Game: {game}\\n"
-        f"Rules: {rule}\\n"
-        f"Recent results (newest first):\\n{hist_text}\\n"
+        f"Game: {game}\n"
+        f"Rules: {rule}\n"
+        f"Recent results (newest first):\n{hist_text}\n"
         "Respond ONLY with JSON: {\"mains\":[int,...],\"special\":null or int}"
     )
 
@@ -601,7 +604,20 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
 
     existing = ws.get_all_records()
     today = dt.datetime.utcnow().strftime("%Y-%m-%d")
-    existing_keys = {(str(r.get("Timestamp",""))[:10], r.get("Game","").strip(), r.get("Method","").strip(), r.get("Prediction","").strip()) for r in existing}
+
+    # Count existing predictions already made TODAY for this game
+    existing_today = [r for r in existing if str(r.get("Game","")).strip()==game and str(r.get("Timestamp","")).startswith(today)]
+    existing_today_preds = {str(r.get("Prediction","")).strip() for r in existing_today}
+
+    # Compute remaining to emit to hit target *for today*
+    enabled_methods_count = 3 + (1 if os.getenv("ENABLE_BASELINE","1") in ("1","true","True","YES","yes") else 0)
+    if os.getenv("ENABLE_LLM_METHOD","0") in ("1","true","True","YES","yes") and os.getenv("OPENAI_API_KEY","").strip():
+        enabled_methods_count += 1
+    total_target = target_total_for_game(game, enabled_methods_count)
+    remaining = max(0, total_target - len(existing_today))
+    if remaining == 0:
+        print(f"[{game}] Already have {len(existing_today)} predictions today; target={total_target}. Skipping new emissions.")
+        return
 
     def append_rows(new_rows: List[List[str]]):
         if not new_rows: return
@@ -638,7 +654,6 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
         methods["llm_gpt"] = (mains_llm, special_llm if game=="Powerball" else None)
 
     enabled_methods = list(methods.keys())
-    total_target = target_total_for_game(game, len(enabled_methods))
 
     timestamp = dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     written_preds = set()
@@ -647,17 +662,18 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
     def emit(md:str, nums:List[int], sp:Optional[int]):
         special = sp if (md=="llm_gpt" and sp is not None) else (special_pb if game=="Powerball" else None)
         pred_str = fmt_prediction_str(game, list(map(int, nums)) if nums else [], special)
-        key = (today, game, md, pred_str)
-        if key in existing_keys or pred_str in written_preds:
+        if pred_str in existing_today_preds or pred_str in written_preds:
             return False
         to_write.append([timestamp, game, pred_str, md, "0", "", ""])
         written_preds.add(pred_str)
         return True
 
-    # Pass 1: one per method
+    # Pass 1: one per method (but stop if we reach today's remaining quota)
     for md in enabled_methods:
+        if remaining <= 0: break
         nums, sp = methods[md]
-        emit(md, nums, sp)
+        if emit(md, nums, sp):
+            remaining -= 1
 
     # Debug env & target
     env_name = {
@@ -667,11 +683,10 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
         "Badger 5":  "PREDICTIONS_BADGER5",
     }[game]
     print(f"[{game}] env {env_name}={os.getenv(env_name)} global PREDICTIONS_PER_GAME={os.getenv('PREDICTIONS_PER_GAME')} ENABLE_BASELINE={os.getenv('ENABLE_BASELINE')} LLM_OK={llm_ok}")
-    print(f"[{game}] enabled_methods={enabled_methods} target_total={total_target} emitted_base={len(to_write)}")
+    print(f"[{game}] existing_today={len(existing_today)} target_total={total_target} remaining_after_base={remaining} base_emitted={len(to_write)}")
 
     # Pass 2: extra variants by weights (no cap per method)
-    extra = max(0, total_target - len(to_write))
-    if extra > 0:
+    if remaining > 0:
         weights = adaptive_weights(ss, game)
         if not weights:
             weights = {m: 1.0/len(enabled_methods) for m in enabled_methods}
@@ -692,8 +707,8 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
         base_cache = {md: list(methods[md][0]) for md in enabled_methods}
         base_sp    = {md: (methods[md][1] if md=="llm_gpt" else None) for md in enabled_methods}
         tries = 0
-        max_tries = 600
-        while extra > 0 and tries < max_tries:
+        max_tries = 800
+        while remaining > 0 and tries < max_tries:
             tries += 1
             md = weighted_pick(weights)
             base_nums = base_cache.get(md, [])
@@ -702,25 +717,25 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
             variant = mutate(base_nums, lo, hi)
             sp = base_sp.get(md, None)
             if emit(md, variant, sp):
-                extra -= 1
+                remaining -= 1
 
-        # Fallback: round-robin over any non-empty base until we reach target or hit a safety cap
-        if extra > 0:
+        # Fallback: round-robin over any non-empty base
+        if remaining > 0:
             non_empty = [m for m,n in base_cache.items() if n]
             rr = 0
             safety = 0
-            while extra > 0 and non_empty and safety < 800:
+            while remaining > 0 and non_empty and safety < 1000:
                 safety += 1
                 md = non_empty[rr % len(non_empty)]
                 rr += 1
                 variant = mutate(base_cache[md], lo, hi)
                 sp = base_sp.get(md, None)
                 if emit(md, variant, sp):
-                    extra -= 1
+                    remaining -= 1
 
-        # Final filler: purely random unique combos to guarantee hitting target
-        if extra > 0:
-            print(f"[{game}] activating final filler: remaining={extra}")
+        # Final filler: purely random unique combos
+        if remaining > 0:
+            print(f"[{game}] activating final filler: need {remaining} more")
             def fresh_combo(need:int, lo:int, hi:int)->List[int]:
                 s = set()
                 while len(s) < need:
@@ -728,13 +743,13 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
                 return sorted(s)
 
             safety2 = 0
-            while extra > 0 and safety2 < 2000:
+            while remaining > 0 and safety2 < 3000:
                 safety2 += 1
                 nums = fresh_combo(need, lo, hi)
                 if emit("filler_random", nums, None):
-                    extra -= 1
+                    remaining -= 1
 
-    print(f"[{game}] wrote {len(to_write)} rows (target_total={total_target})")
+    print(f"[{game}] appended {len(to_write)} rows this run; now should total {len(existing_today)+len(to_write)} for today (target={total_target})")
     append_rows(to_write)
 
 # ---- Main orchestrator ----
@@ -802,7 +817,7 @@ def main():
             runlog[game_label] = {"LastResultDate": latest_date, "LastPredictedNextDraw": normalize_date(next_draw or "")}
 
     write_runlog(ss, runlog)
-    print("Success! v4.2.6 finished.")
+    print("Success! v4.2.7 finished.")
     
 if __name__ == "__main__":
     main()
