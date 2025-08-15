@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-'''
-main.py — v4.2.7
-- Enforce per‑day totals per game: if today already has K predictions, only emit (target-K) more.
-- Dedup by prediction string (not method) across same day + game.
-- Keep final filler to *guarantee* reaching the requested count.
-- Extra debug: show existing_today_count, remaining_to_emit, and whether filler triggered.
-- Keeps prior fixes: normalization, merge mode, adaptive weights, optional LLM, Run_Log gating.
-'''
+"""
+main.py — v4.2.8
+
+What this build does:
+- Appends/merges *all past* results into your *_Results tabs (no reformatting).
+- Normalizes dates and numbers to keep your sheets stable.
+- Writes predictions only when a game has a **new result** (or when forced).
+- Guarantees the exact per-game count each day (uses filler if needed).
+- Dedups by prediction string for the same day/game.
+- Scores yesterday’s predictions against the latest result and updates Prediction_Tracker.
+- Adaptive weighting prefers methods that historically match more numbers.
+- Optional LLM method (off unless ENABLE_LLM_METHOD=1 and OPENAI_API_KEY is present).
+- Adds clear debug prints in the Actions log.
+"""
+
 import os, json, datetime as dt, re, random
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -246,7 +253,7 @@ def b5_rows_from_draws(draws: List[Dict[str,Any]]) -> List[List[Any]]:
     out.sort(key=lambda r: date_key(r[0]), reverse=True)
     return out
 
-# ---- Methods (non‑LLM) ----
+# ---- Methods (non-LLM) ----
 def unique_combo(nums: List[int], need:int, lo:int, hi:int) -> List[int]:
     s = sorted(set(n for n in nums if isinstance(n,int) and lo<=n<=hi))
     while len(s) < need:
@@ -505,7 +512,7 @@ def llm_pick_numbers(game:str, rows_hist: List[List[Any]]) -> Tuple[List[int], O
         f"Game: {game}\n"
         f"Rules: {rule}\n"
         f"Recent results (newest first):\n{hist_text}\n"
-        "Respond ONLY with JSON: {\"mains\":[int,...],\"special\":null or int}"
+        'Respond ONLY with JSON: {"mains":[int,...],"special":null or int}'
     )
 
     mains, special = [], None
@@ -569,7 +576,7 @@ def llm_pick_numbers(game:str, rows_hist: List[List[Any]]) -> Tuple[List[int], O
 
     return mains, special
 
-# ---- Per‑game totals ----
+# ---- Per-game totals ----
 def safe_int(s: Optional[str]) -> Optional[int]:
     if s is None: return None
     ss = str(s).strip()
@@ -803,6 +810,8 @@ def main():
         ("Badger 5", merged_b5, next_b5),
     ]
 
+    force = os.getenv("FORCE_PREDICT_TODAY", "0").lower() in ("1","true","yes")
+
     for game_label, merged_rows, next_draw in results:
         if not merged_rows: 
             continue
@@ -810,14 +819,20 @@ def main():
         rl = runlog.get(game_label, {"LastResultDate":"", "LastPredictedNextDraw":""})
         prev = normalize_date(rl.get("LastResultDate",""))
         is_new = (latest_date != prev)
-        print(f"[{game_label}] latest_date={latest_date} prev={prev} is_new={is_new}")
-        if is_new:
-            evaluate_pending_predictions(ss, game_label, merged_rows[0])
+        print(f"[{game_label}] latest_date={latest_date} prev={prev} is_new={is_new} force={force}")
+        if is_new or force:
+            # Only score predictions when we truly have a new result
+            if is_new:
+                evaluate_pending_predictions(ss, game_label, merged_rows[0])
+                runlog[game_label] = {
+                    "LastResultDate": latest_date,
+                    "LastPredictedNextDraw": normalize_date(next_draw or "")
+                }
+            # (Whether new or forced) emit predictions for next draw
             write_predictions_for_game(ss, game_label, merged_rows, next_draw)
-            runlog[game_label] = {"LastResultDate": latest_date, "LastPredictedNextDraw": normalize_date(next_draw or "")}
 
     write_runlog(ss, runlog)
-    print("Success! v4.2.7 finished.")
+    print("Success! v4.2.8 finished.")
     
 if __name__ == "__main__":
     main()
