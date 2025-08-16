@@ -20,8 +20,8 @@ jobs:
           GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
           SHEET_NAME: Lottery Predictor New August 25
           ENABLE_PREDICTIONS: "1"
-          PRED_COUNT_POWERBALL: "20"
-          PRED_COUNT_MEGABUCKS: "20"
-          PRED_COUNT_SUPERCASH: "20"
-          PRED_COUNT_BADGER5: "20"
+          PRED_COUNT_POWERBALL: "5"
+          PRED_COUNT_MEGABUCKS: "10"
+          PRED_COUNT_SUPERCASH: "10"
+          PRED_COUNT_BADGER5: "10"
         run: python main.py
