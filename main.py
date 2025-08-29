@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-main.py — v4.3.1 (diagnostic)
+main.py — v4.3.2 (diagnostic + local-day)
 
-Adds:
-- SHEET_ID support (prefer ID over name).
-- [DIAG] prints: service account email, target sheet title/ID/URL.
-- Writes to Debug_Touch every run so you can verify writes.
-- Keeps: merge results, normalize types, only predict on new results (or force),
-  exact per-game totals, dedupe, adaptive weighting, optional LLM method.
+Changes vs 4.3.1:
+- Counts "today" using LOCAL_TZ (default America/Chicago) so per-day prediction
+  budgets align with your local day instead of UTC.
+- Debug_Touch timestamps written in LOCAL_TZ.
+- Keeps: SHEET_ID targeting, [DIAG] prints, tracker width normalization (A..G),
+  merge results, dedupe, adaptive weighting, optional LLM method, etc.
 """
 
 import os, json, datetime as dt, re, random
@@ -17,6 +17,20 @@ import requests
 import gspread
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError
+from zoneinfo import ZoneInfo  # Python 3.10+
+
+# ---- Local timezone helpers (defaults to America/Chicago) ----
+LOCAL_TZ = os.getenv("LOCAL_TZ", "America/Chicago")
+TZ = ZoneInfo(LOCAL_TZ)
+
+def now_local() -> dt.datetime:
+    return dt.datetime.now(TZ)
+
+def today_local_str() -> str:
+    return now_local().strftime("%Y-%m-%d")
+
+def timestamp_local_str() -> str:
+    return now_local().strftime("%Y-%m-%d %H:%M:%S %Z")
 
 # ---- Config ----
 DEFAULT_SHEET_NAME = "Lottery Predictor New August 25"
@@ -76,11 +90,12 @@ def get_or_create_worksheet(ss, title, rows=1000, cols=26):
         return ss.add_worksheet(title=title, rows=str(rows), cols=str(cols))
 
 def append_health_check(ws_health):
-    now = dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    # Leave Health_Check in UTC as a neutral heartbeat
+    now_utc = dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     headers = ["Timestamp_UTC","Status"]
     try: ws_health.update(values=[headers], range_name="A1")
     except APIError: pass
-    ws_health.append_row([now,"OK"], value_input_option="RAW")
+    ws_health.append_row([now_utc,"OK"], value_input_option="RAW")
 
 def fetch_wi_results(rapid_key:str)->Dict[str,Any]:
     h = {"x-rapidapi-key": rapid_key, "x-rapidapi-host": API_HOST}
@@ -649,7 +664,9 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
     except APIError: pass
 
     existing = ws.get_all_records()
-    today = dt.datetime.utcnow().strftime("%Y-%m-%d")
+
+    # Use LOCAL_TZ (America/Chicago by default) for "today"
+    today = today_local_str()
 
     # Count existing predictions already made TODAY for this game
     existing_today = [r for r in existing if str(r.get("Game","")).strip()==game and str(r.get("Timestamp","")).startswith(today)]
@@ -701,7 +718,9 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
 
     enabled_methods = list(methods.keys())
 
-    timestamp = dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    # Local timestamp for the Prediction_Tracker entries
+    timestamp = timestamp_local_str()
+
     written_preds = set()
     to_write = []
 
@@ -810,6 +829,7 @@ def main():
     print(f"[DIAG] Service account email: {sa_email}")
     print(f"[DIAG] Spreadsheet title: {ss.title} | id: {ss.id}")
     print(f"[DIAG] Spreadsheet URL: {ss_url}")
+    print(f"[DIAG] LOCAL_TZ in effect: {LOCAL_TZ}")
 
     # Health & scratch
     ws_health = get_or_create_worksheet(ss, "Health_Check", rows=100, cols=3)
@@ -817,10 +837,10 @@ def main():
     ws_index  = get_or_create_worksheet(ss, "Games_Index", rows=100, cols=3)
     append_health_check(ws_health)
 
-    # Touch log to prove writes every run
+    # Touch log to prove writes every run (use local tz for visibility)
     try:
         ws_touch = get_or_create_worksheet(ss, "Debug_Touch", rows=200, cols=3)
-        ws_touch.append_row([dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"), "ran", "v4.3.1"], value_input_option="RAW")
+        ws_touch.append_row([timestamp_local_str(), "ran", "v4.3.2"], value_input_option="RAW")
         print("[DIAG] Wrote a Debug_Touch row successfully.")
     except Exception as e:
         print(f"[DIAG] Failed to write Debug_Touch: {e}")
@@ -902,7 +922,7 @@ def main():
             write_predictions_for_game(ss, game_label, merged_rows, next_draw)
 
     write_runlog(ss, runlog)
-    print("Success! v4.3.1 finished. See Debug_Touch for this run’s timestamp.")
+    print("Success! v4.3.2 finished. See Debug_Touch for this run’s timestamp.")
     
 if __name__ == "__main__":
     main()
