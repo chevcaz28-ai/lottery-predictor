@@ -2,7 +2,7 @@ name: Lottery Automation
 
 on:
   schedule:
-    - cron: "0 8 * * *"   # runs daily at 08:00 UTC (02:00/03:00 Central depending on DST)
+    - cron: "0 8 * * *"   # runs daily at 08:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: Check out repo
-      - uses: actions/checkout@v4
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -30,10 +30,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install gspread google-auth requests openai
 
-      # Optional: echo non-secret config so you can confirm your targets
       - name: Echo config
         run: |
           echo "SHEET_NAME=${{ vars.SHEET_NAME }}"
+          echo "SHEET_ID=${{ vars.SHEET_ID }}"
           echo "PREDICTIONS_POWERBALL=${{ vars.PREDICTIONS_POWERBALL }}"
           echo "PREDICTIONS_MEGABUCKS=${{ vars.PREDICTIONS_MEGABUCKS }}"
           echo "PREDICTIONS_SUPERCASH=${{ vars.PREDICTIONS_SUPERCASH }}"
@@ -48,29 +48,29 @@ jobs:
           # Required secrets
           GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
           RAPID_API_KEY:     ${{ secrets.RAPID_API_KEY }}
-          # Optional: for LLM predictions (only used if ENABLE_LLM_METHOD=1)
+          # Optional LLM
           OPENAI_API_KEY:    ${{ secrets.OPENAI_API_KEY }}
 
-          # Optional sheet override
-          SHEET_NAME:        ${{ vars.SHEET_NAME }}
+          # Target spreadsheet (ID preferred to avoid ambiguity)
+          SHEET_ID:          ${{ vars.SHEET_ID }}            # <-- set this to the spreadsheet key
+          SHEET_NAME:        ${{ vars.SHEET_NAME }}          # fallback if no SHEET_ID
 
           # Core controls
           ENABLE_PREDICTIONS: "1"
-          ENABLE_BASELINE: "0"           # "0" to hide baseline, "1" to include it
+          ENABLE_BASELINE: "0"
 
-          # Per-game totals (repo "Variables")
+          # Per-game totals
           PREDICTIONS_POWERBALL:  ${{ vars.PREDICTIONS_POWERBALL }}
           PREDICTIONS_MEGABUCKS:  ${{ vars.PREDICTIONS_MEGABUCKS }}
           PREDICTIONS_SUPERCASH:  ${{ vars.PREDICTIONS_SUPERCASH }}
           PREDICTIONS_BADGER5:    ${{ vars.PREDICTIONS_BADGER5 }}
-          # Fallback global default if any of the above are missing
           PREDICTIONS_PER_GAME:   ${{ vars.PREDICTIONS_PER_GAME }}
 
-          # LLM method toggle/model
-          ENABLE_LLM_METHOD:  ${{ vars.ENABLE_LLM_METHOD }}   # "1" or "0"
-          OPENAI_MODEL:       ${{ vars.OPENAI_MODEL }}        # e.g., gpt-4o-mini
+          # LLM method
+          ENABLE_LLM_METHOD:  ${{ vars.ENABLE_LLM_METHOD }}
+          OPENAI_MODEL:       ${{ vars.OPENAI_MODEL }}
 
-          # Manual forcing of predictions (for ad-hoc tests / pre-draw runs)
-          FORCE_PREDICT_TODAY: ${{ vars.FORCE_PREDICT_TODAY }}  # "0" normally; set "1" to force
+          # Manual forcing (optional)
+          FORCE_PREDICT_TODAY: ${{ vars.FORCE_PREDICT_TODAY }}
         run: |
           python -u main.py
