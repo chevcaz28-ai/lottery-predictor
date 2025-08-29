@@ -402,14 +402,19 @@ def write_runlog(ss, db):
 # ---- Evaluate pending predictions ----
 def evaluate_pending_predictions(ss, game:str, latest_row: List[Any]):
     ws = get_or_create_worksheet(ss, "Prediction_Tracker", rows=20000, cols=len(TRACKER_COLS))
+    # Ensure the header is exactly our 7 columns (A..G)
     try: ws.update(values=[TRACKER_COLS], range_name="A1")
     except APIError: pass
 
     all_vals = ws.get_all_values()
-    if not all_vals: return
-    header = all_vals[0]; rows = all_vals[1:]
-    col_idx = {name:i for i,name in enumerate(header)}
+    if not all_vals:
+        return
 
+    header = all_vals[0]
+    rows = all_vals[1:]
+    col_idx = {name:i for i,name in enumerate(TRACKER_COLS)}  # use our canonical header
+
+    # Determine the latest winning mains for this game
     if game=="Powerball":
         latest_mains = [int(x) for x in latest_row[1:6] if str(x).isdigit()]
     elif game=="Megabucks":
@@ -422,32 +427,55 @@ def evaluate_pending_predictions(ss, game:str, latest_row: List[Any]):
         latest_mains = []
 
     updates = []
-    for i, r in enumerate(rows, start=2):
+    for i, r in enumerate(rows, start=2):  # sheet row numbers
+        # Guard against short/long rows
+        r = list(r)
+        r = (r + [""]*(len(TRACKER_COLS) - len(r)))[:len(TRACKER_COLS)]
+
         try:
             gm = r[col_idx["Game"]].strip()
-        except: 
+        except Exception:
             continue
-        if gm != game: 
+        if gm != game:
             continue
-        matches = r[col_idx["Matches"]].strip() if len(r)>col_idx["Matches"] else ""
-        if matches != "":
+
+        # Skip if already evaluated
+        matches_cell = r[col_idx["Matches"]]
+        if str(matches_cell).strip() != "":
             continue
+
         pred_str = r[col_idx["Prediction"]]
         pred_nums, _ = parse_prediction_to_nums(game, pred_str)
-        inter, cnt = intersect_count(pred_nums, latest_mains)
+        inter = sorted(set(pred_nums) & set(latest_mains))
+        cnt = len(inter)
+
         win = 1 if (game=="Powerball" and cnt==5) or \
                   (game=="Megabucks" and cnt==6) or \
                   (game=="Super Cash" and cnt==6) or \
                   (game=="Badger 5" and cnt==5) else 0
-        updates.append((i, {"Win Count": str(win), "Matches": ",".join(str(x) for x in inter), "Match Count": str(cnt)}))
+
+        # Apply changes back into the normalized row
+        r[col_idx["Win Count"]]  = str(win)
+        r[col_idx["Matches"]]    = ",".join(str(x) for x in inter)
+        r[col_idx["Match Count"]] = str(cnt)
+
+        updates.append((i, r))
+
     if updates:
-        mod_rows = [list(r) + [""]*(len(TRACKER_COLS)-len(r)) for r in rows]
-        for i, changes in updates:
-            ridx = i-2
-            for k,v in changes.items():
-                c = col_idx[k]
-                mod_rows[ridx][c] = v
-        end_col = col_letter(len(TRACKER_COLS))
+        # Rebuild mod_rows (normalized to exactly A..G) and bulk write
+        mod_rows = []
+        # rows list corresponds to A2..; keep the original order/length
+        for i, r in enumerate(rows, start=2):
+            # default to normalized original row width, even if untouched
+            norm = (list(r) + [""]*(len(TRACKER_COLS)-len(r)))[:len(TRACKER_COLS)]
+            # if this row had an update, use it instead
+            for (ri, upd) in updates:
+                if ri == i:
+                    norm = upd
+                    break
+            mod_rows.append(norm)
+
+        end_col = col_letter(len(TRACKER_COLS))  # 'G'
         ws.update(values=mod_rows, range_name=f"A2:{end_col}{len(mod_rows)+1}")
 
 # ---- Adaptive weights ----
