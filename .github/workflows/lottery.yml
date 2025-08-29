@@ -44,7 +44,7 @@ jobs:
           echo "FORCE_PREDICT_TODAY=${{ vars.FORCE_PREDICT_TODAY }}"
 
       - name: Run script
-        env:
+          LOCAL_TZ: "America/Chicago"
           # Required secrets
           GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
           RAPID_API_KEY:     ${{ secrets.RAPID_API_KEY }}
