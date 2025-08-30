@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-main.py — v4.5.0 (per-next-draw budgeting + Chicago-day timestamps)
+main.py — v4.5.1 (per-next-draw budgeting + Chicago-day timestamps + tracker normalization)
 
-Key changes in 4.5.0:
-- Prediction budgeting is now per (Game, Next Draw Date) instead of per day.
-- Adds a new column to Prediction_Tracker: "Next Draw Date" (column C).
-- Normalizes the tracker to exactly 8 columns (A..H) on every update to avoid width errors.
-- Keeps: Chicago-time timestamps, SHEET_ID targeting, diagnostics, merge & dedupe,
-  adaptive weighting, optional LLM method, etc.
+Key changes in 4.5.1:
+- Fix crash in adaptive_weights when legacy rows had numbers in the "Method" column
+  (cast to str; skip unknown methods).
+- Normalize Prediction_Tracker to exactly 8 columns (A..H) BEFORE computing weights
+  and BEFORE appending new rows, so header/width drift can't break reads.
+- Keeps: per-draw budgeting, Chicago-time timestamps, SHEET_ID targeting,
+  diagnostics, merge & dedupe, adaptive weighting, optional LLM method, etc.
 """
 
 import os, json, datetime as dt, re, random
@@ -44,7 +45,7 @@ RESULT_SCHEMAS = {
     "Badger5_Results":   ["Date","N1","N2","N3","N4","N5"],
 }
 
-# NEW: Tracker now has 8 columns (A..H), adding "Next Draw Date" at C
+# Tracker has 8 columns (A..H), with "Next Draw Date" at C
 TRACKER_COLS = ["Timestamp","Game","Next Draw Date","Prediction","Method","Win Count","Matches","Match Count"]
 
 # ---- Utilities ----
@@ -411,18 +412,37 @@ def write_runlog(ss, db):
         rows.append([gm, normalize_date(info.get("LastResultDate","")), normalize_date(info.get("LastPredictedNextDraw",""))])
     ws.update(values=rows, range_name="A1")
 
+# ---- Tracker normalization (ensure header & width A..H) ----
+def normalize_tracker(ws):
+    """Ensure Prediction_Tracker has our exact header and 8 columns for every row."""
+    # Enforce header
+    try: ws.update(values=[TRACKER_COLS], range_name="A1")
+    except APIError: pass
+    vals = ws.get_all_values()
+    body = vals[1:] if len(vals) >= 2 else []
+    if not body:
+        return
+    need_cols = len(TRACKER_COLS)
+    changed = False
+    norm_rows = []
+    for r in body:
+        if len(r) != need_cols:
+            changed = True
+        norm_rows.append((list(r) + [""]*(need_cols - len(r)))[:need_cols])
+    if changed:
+        end_col = col_letter(need_cols)
+        ws.update(values=norm_rows, range_name=f"A2:{end_col}{len(norm_rows)+1}")
+
 # ---- Evaluate pending predictions ----
 def evaluate_pending_predictions(ss, game:str, latest_row: List[Any]):
     ws = get_or_create_worksheet(ss, "Prediction_Tracker", rows=20000, cols=len(TRACKER_COLS))
-    # Ensure the header is exactly our 8 columns (A..H)
-    try: ws.update(values=[TRACKER_COLS], range_name="A1")
-    except APIError: pass
+    # Normalize before reading/updating
+    normalize_tracker(ws)
 
     all_vals = ws.get_all_values()
     if not all_vals:
         return
 
-    # Use our canonical header order for indexing
     rows = all_vals[1:]
     col_idx = {name:i for i,name in enumerate(TRACKER_COLS)}
 
@@ -440,11 +460,10 @@ def evaluate_pending_predictions(ss, game:str, latest_row: List[Any]):
 
     updates = []
     for i, r in enumerate(rows, start=2):  # sheet row numbers
-        # Normalize row width to 8 columns
         r = (list(r) + [""]*(len(TRACKER_COLS) - len(r)))[:len(TRACKER_COLS)]
 
         try:
-            gm = r[col_idx["Game"]].strip()
+            gm = str(r[col_idx["Game"]]).strip()
         except Exception:
             continue
         if gm != game:
@@ -483,11 +502,18 @@ def evaluate_pending_predictions(ss, game:str, latest_row: List[Any]):
 # ---- Adaptive weights ----
 def adaptive_weights(ss, game:str) -> Dict[str,float]:
     ws = get_or_create_worksheet(ss, "Prediction_Tracker", rows=20000, cols=len(TRACKER_COLS))
+    # Normalize before reading
+    normalize_tracker(ws)
     recs = ws.get_all_records()
     stats = {}
+    allowed_methods = {"last_draw_baseline","freq50","recency","markov1","llm_gpt","filler_random"}
     for r in recs:
-        if r.get("Game","").strip()!=game: continue
-        md = r.get("Method","").strip()
+        if str(r.get("Game","")).strip()!=game: 
+            continue
+        md = str(r.get("Method","") if r.get("Method","") is not None else "").strip()
+        if md not in allowed_methods:
+            # ignore legacy/misaligned rows
+            continue
         try: mc = int(str(r.get("Match Count","0")).strip() or "0")
         except: mc = 0
         try: wc = int(str(r.get("Win Count","0")).strip() or "0")
@@ -647,9 +673,8 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
     if os.getenv("ENABLE_PREDICTIONS","1").lower() not in ("1","true","yes"):
         return
     ws = get_or_create_worksheet(ss, "Prediction_Tracker", rows=20000, cols=len(TRACKER_COLS))
-    # Ensure header includes "Next Draw Date" as C and width is 8 cols
-    try: ws.update(values=[TRACKER_COLS], range_name="A1")
-    except APIError: pass
+    # Normalize BEFORE reading/weighting/appending
+    normalize_tracker(ws)
 
     existing = ws.get_all_records()
 
@@ -674,7 +699,9 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
 
     def append_rows(new_rows: List[List[str]]):
         if not new_rows: return
-        start_row = len(existing) + 2
+        # Re-read count in case someone edited between normalize and now
+        existing2 = ws.get_all_values()
+        start_row = (len(existing2)-1) + 2 if existing2 else 2  # rows after header
         end_row = start_row + len(new_rows) - 1
         end_col = col_letter(len(TRACKER_COLS))  # 'H'
         ws.update(values=new_rows, range_name=f"A{start_row}:{end_col}{end_row}")
@@ -829,7 +856,7 @@ def main():
     # Touch log to prove writes every run (use local tz for visibility)
     try:
         ws_touch = get_or_create_worksheet(ss, "Debug_Touch", rows=200, cols=3)
-        ws_touch.append_row([timestamp_local_str(), "ran", "v4.5.0"], value_input_option="RAW")
+        ws_touch.append_row([timestamp_local_str(), "ran", "v4.5.1"], value_input_option="RAW")
         print("[DIAG] Wrote a Debug_Touch row successfully.")
     except Exception as e:
         print(f"[DIAG] Failed to write Debug_Touch: {e}")
@@ -914,7 +941,7 @@ def main():
             write_predictions_for_game(ss, game_label, merged_rows, next_draw)
 
     write_runlog(ss, runlog)
-    print("Success! v4.5.0 finished. See Debug_Touch for this run’s timestamp.")
+    print("Success! v4.5.1 finished. See Debug_Touch for this run’s timestamp.")
 
 if __name__ == "__main__":
     main()
