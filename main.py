@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-main.py — v4.3.2 (diagnostic + local-day)
+main.py — v4.5.0 (per-next-draw budgeting + Chicago-day timestamps)
 
-Changes vs 4.3.1:
-- Counts "today" using LOCAL_TZ (default America/Chicago) so per-day prediction
-  budgets align with your local day instead of UTC.
-- Debug_Touch timestamps written in LOCAL_TZ.
-- Keeps: SHEET_ID targeting, [DIAG] prints, tracker width normalization (A..G),
-  merge results, dedupe, adaptive weighting, optional LLM method, etc.
+Key changes in 4.5.0:
+- Prediction budgeting is now per (Game, Next Draw Date) instead of per day.
+- Adds a new column to Prediction_Tracker: "Next Draw Date" (column C).
+- Normalizes the tracker to exactly 8 columns (A..H) on every update to avoid width errors.
+- Keeps: Chicago-time timestamps, SHEET_ID targeting, diagnostics, merge & dedupe,
+  adaptive weighting, optional LLM method, etc.
 """
 
 import os, json, datetime as dt, re, random
@@ -19,7 +19,7 @@ from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError
 from zoneinfo import ZoneInfo  # Python 3.10+
 
-# ---- Local timezone helpers (defaults to America/Chicago) ----
+# ---- Local timezone helpers (defaults to America/Chicago for display/heartbeats) ----
 LOCAL_TZ = os.getenv("LOCAL_TZ", "America/Chicago")
 TZ = ZoneInfo(LOCAL_TZ)
 
@@ -43,10 +43,12 @@ RESULT_SCHEMAS = {
     "SuperCash_Results": ["Date","N1","N2","N3","N4","N5","N6","Doubler"],
     "Badger5_Results":   ["Date","N1","N2","N3","N4","N5"],
 }
-TRACKER_COLS = ["Timestamp","Game","Prediction","Method","Win Count","Matches","Match Count"]
+
+# NEW: Tracker now has 8 columns (A..H), adding "Next Draw Date" at C
+TRACKER_COLS = ["Timestamp","Game","Next Draw Date","Prediction","Method","Win Count","Matches","Match Count"]
 
 # ---- Utilities ----
-def fail(msg:str): 
+def fail(msg:str):
     raise RuntimeError(msg)
 
 def load_runtime_config():
@@ -90,7 +92,7 @@ def get_or_create_worksheet(ss, title, rows=1000, cols=26):
         return ss.add_worksheet(title=title, rows=str(rows), cols=str(cols))
 
 def append_health_check(ws_health):
-    # Leave Health_Check in UTC as a neutral heartbeat
+    # Keep Health_Check in UTC as a neutral heartbeat
     now_utc = dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     headers = ["Timestamp_UTC","Status"]
     try: ws_health.update(values=[headers], range_name="A1")
@@ -140,7 +142,7 @@ def to_int(v)->Optional[int]:
         sv = str(v).strip()
         if sv == "": return None
         return int(sv)
-    except: 
+    except:
         return None
 
 def parse_numbers_objects(nums: List[Dict[str,Any]])->Tuple[List[int], Optional[int], Optional[str]]:
@@ -191,10 +193,10 @@ def col_letter(n:int)->str:
         s = chr(65+r)+s
     return s or "A"
 
-# ---- Read/Write tables with normalization ----
+# ---- Read/Write normalization ----
 def coerce_row_types(ws_title:str, headers: List[str], row: List[Any]) -> List[Any]:
     out = list(row) + [""]*(len(headers)-len(row))
-    out[0] = normalize_date(out[0])
+    out[0] = normalize_date(out[0])  # "Date" for result tabs OR "Timestamp" for tracker—safe to leave
     if ws_title=="Powerball_Results":
         idxs = [1,2,3,4,5,6]
     elif ws_title=="Megabucks_Results":
@@ -367,11 +369,6 @@ def fmt_prediction_str(game:str, nums: List[int], special: Optional[int]=None) -
         return f"{core} (+PB {special})"
     return core
 
-def intersect_count(a: List[int], b: List[int]) -> Tuple[List[int], int]:
-    aset = set(a); bset = set(b)
-    inter = sorted(list(aset & bset))
-    return inter, len(inter)
-
 def parse_prediction_to_nums(game:str, pred_str:str) -> Tuple[List[int], Optional[int]]:
     main_part = pred_str
     special = None
@@ -417,7 +414,7 @@ def write_runlog(ss, db):
 # ---- Evaluate pending predictions ----
 def evaluate_pending_predictions(ss, game:str, latest_row: List[Any]):
     ws = get_or_create_worksheet(ss, "Prediction_Tracker", rows=20000, cols=len(TRACKER_COLS))
-    # Ensure the header is exactly our 7 columns (A..G)
+    # Ensure the header is exactly our 8 columns (A..H)
     try: ws.update(values=[TRACKER_COLS], range_name="A1")
     except APIError: pass
 
@@ -425,9 +422,9 @@ def evaluate_pending_predictions(ss, game:str, latest_row: List[Any]):
     if not all_vals:
         return
 
-    header = all_vals[0]
+    # Use our canonical header order for indexing
     rows = all_vals[1:]
-    col_idx = {name:i for i,name in enumerate(TRACKER_COLS)}  # use our canonical header
+    col_idx = {name:i for i,name in enumerate(TRACKER_COLS)}
 
     # Determine the latest winning mains for this game
     if game=="Powerball":
@@ -443,9 +440,8 @@ def evaluate_pending_predictions(ss, game:str, latest_row: List[Any]):
 
     updates = []
     for i, r in enumerate(rows, start=2):  # sheet row numbers
-        # Guard against short/long rows
-        r = list(r)
-        r = (r + [""]*(len(TRACKER_COLS) - len(r)))[:len(TRACKER_COLS)]
+        # Normalize row width to 8 columns
+        r = (list(r) + [""]*(len(TRACKER_COLS) - len(r)))[:len(TRACKER_COLS)]
 
         try:
             gm = r[col_idx["Game"]].strip()
@@ -469,28 +465,19 @@ def evaluate_pending_predictions(ss, game:str, latest_row: List[Any]):
                   (game=="Super Cash" and cnt==6) or \
                   (game=="Badger 5" and cnt==5) else 0
 
-        # Apply changes back into the normalized row
-        r[col_idx["Win Count"]]  = str(win)
-        r[col_idx["Matches"]]    = ",".join(str(x) for x in inter)
+        r[col_idx["Win Count"]]   = str(win)
+        r[col_idx["Matches"]]     = ",".join(str(x) for x in inter)
         r[col_idx["Match Count"]] = str(cnt)
 
         updates.append((i, r))
 
     if updates:
-        # Rebuild mod_rows (normalized to exactly A..G) and bulk write
+        # Overwrite the range A2:H with normalized rows so the sheet width stays consistent
         mod_rows = []
-        # rows list corresponds to A2..; keep the original order/length
-        for i, r in enumerate(rows, start=2):
-            # default to normalized original row width, even if untouched
+        for r in rows:
             norm = (list(r) + [""]*(len(TRACKER_COLS)-len(r)))[:len(TRACKER_COLS)]
-            # if this row had an update, use it instead
-            for (ri, upd) in updates:
-                if ri == i:
-                    norm = upd
-                    break
             mod_rows.append(norm)
-
-        end_col = col_letter(len(TRACKER_COLS))  # 'G'
+        end_col = col_letter(len(TRACKER_COLS))  # 'H'
         ws.update(values=mod_rows, range_name=f"A2:{end_col}{len(mod_rows)+1}")
 
 # ---- Adaptive weights ----
@@ -655,38 +642,41 @@ def target_total_for_game(game:str, enabled_method_count:int) -> int:
         return max(global_default, enabled_method_count)
     return enabled_method_count
 
-# ---- Write predictions ----
+# ---- Write predictions (PER-DRAW budgeting) ----
 def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_draw_date:str):
     if os.getenv("ENABLE_PREDICTIONS","1").lower() not in ("1","true","yes"):
         return
     ws = get_or_create_worksheet(ss, "Prediction_Tracker", rows=20000, cols=len(TRACKER_COLS))
+    # Ensure header includes "Next Draw Date" as C and width is 8 cols
     try: ws.update(values=[TRACKER_COLS], range_name="A1")
     except APIError: pass
 
     existing = ws.get_all_records()
 
-    # Use LOCAL_TZ (America/Chicago by default) for "today"
-    today = today_local_str()
+    # Use PER-DRAW key (fallback to today's local date if API omits)
+    next_key = normalize_date(next_draw_date) or today_local_str()
 
-    # Count existing predictions already made TODAY for this game
-    existing_today = [r for r in existing if str(r.get("Game","")).strip()==game and str(r.get("Timestamp","")).startswith(today)]
-    existing_today_preds = {str(r.get("Prediction","")).strip() for r in existing_today}
+    # Filter existing predictions for THIS (Game, Next Draw Date)
+    existing_for_draw = [r for r in existing
+                         if str(r.get("Game","")).strip()==game
+                         and normalize_date(r.get("Next Draw Date",""))==next_key]
+    existing_preds_for_draw = {str(r.get("Prediction","")).strip() for r in existing_for_draw}
 
-    # Compute remaining to emit to hit target *for today*
+    # Compute remaining to emit to hit target for *this draw*
     enabled_methods_count = 3 + (1 if os.getenv("ENABLE_BASELINE","1").lower() in ("1","true","yes") else 0)
     if os.getenv("ENABLE_LLM_METHOD","0").lower() in ("1","true","yes") and os.getenv("OPENAI_API_KEY","").strip():
         enabled_methods_count += 1
     total_target = target_total_for_game(game, enabled_methods_count)
-    remaining = max(0, total_target - len(existing_today))
+    remaining = max(0, total_target - len(existing_for_draw))
     if remaining == 0:
-        print(f"[{game}] Already have {len(existing_today)} predictions today; target={total_target}. Skipping new emissions.")
+        print(f"[{game}] Already have {len(existing_for_draw)} predictions for draw={next_key}; target={total_target}. Skipping new emissions.")
         return
 
     def append_rows(new_rows: List[List[str]]):
         if not new_rows: return
         start_row = len(existing) + 2
         end_row = start_row + len(new_rows) - 1
-        end_col = col_letter(len(TRACKER_COLS))
+        end_col = col_letter(len(TRACKER_COLS))  # 'H'
         ws.update(values=new_rows, range_name=f"A{start_row}:{end_col}{end_row}")
 
     # Game ranges
@@ -717,8 +707,6 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
         methods["llm_gpt"] = (mains_llm, special_llm if game=="Powerball" else None)
 
     enabled_methods = list(methods.keys())
-
-    # Local timestamp for the Prediction_Tracker entries
     timestamp = timestamp_local_str()
 
     written_preds = set()
@@ -727,13 +715,14 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
     def emit(md:str, nums:List[int], sp:Optional[int]):
         special = sp if (md=="llm_gpt" and sp is not None) else (special_pb if game=="Powerball" else None)
         pred_str = fmt_prediction_str(game, list(map(int, nums)) if nums else [], special)
-        if pred_str in existing_today_preds or pred_str in written_preds:
+        if pred_str in existing_preds_for_draw or pred_str in written_preds:
             return False
-        to_write.append([timestamp, game, pred_str, md, "0", "", ""])
+        # Row: Timestamp | Game | Next Draw Date | Prediction | Method | Win Count | Matches | Match Count
+        to_write.append([timestamp, game, next_key, pred_str, md, "0", "", ""])
         written_preds.add(pred_str)
         return True
 
-    # Pass 1: one per method (stop if quota met)
+    # Pass 1: one per method
     for md in enabled_methods:
         if remaining <= 0: break
         nums, sp = methods[md]
@@ -747,7 +736,7 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
         "Badger 5":  "PREDICTIONS_BADGER5",
     }[game]
     print(f"[{game}] env {env_name}={os.getenv(env_name)} global PREDICTIONS_PER_GAME={os.getenv('PREDICTIONS_PER_GAME')} ENABLE_BASELINE={os.getenv('ENABLE_BASELINE')} LLM_OK={llm_ok}")
-    print(f"[{game}] existing_today={len(existing_today)} target_total={total_target} remaining_after_base={remaining} base_emitted={len(to_write)}")
+    print(f"[{game}] existing_for_draw={len(existing_for_draw)} target_total={total_target} remaining_after_base={remaining} base_emitted={len(to_write)} draw={next_key}")
 
     # Pass 2: extra variants by weights (no cap per method)
     if remaining > 0:
@@ -799,7 +788,7 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
 
         # Final filler: random unique combos
         if remaining > 0:
-            print(f"[{game}] activating final filler: need {remaining} more")
+            print(f"[{game}] activating final filler: need {remaining} more (draw={next_key})")
             def fresh_combo(need:int, lo:int, hi:int)->List[int]:
                 s = set()
                 while len(s) < need:
@@ -813,7 +802,7 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
                 if emit("filler_random", nums, None):
                     remaining -= 1
 
-    print(f"[{game}] appended {len(to_write)} rows this run; now should total {len(existing_today)+len(to_write)} for today (target={total_target})")
+    print(f"[{game}] appended {len(to_write)} rows this run for draw={next_key}; now should total {len(existing_for_draw)+len(to_write)} (target={total_target})")
     append_rows(to_write)
 
 # ---- Main orchestrator ----
@@ -840,7 +829,7 @@ def main():
     # Touch log to prove writes every run (use local tz for visibility)
     try:
         ws_touch = get_or_create_worksheet(ss, "Debug_Touch", rows=200, cols=3)
-        ws_touch.append_row([timestamp_local_str(), "ran", "v4.3.2"], value_input_option="RAW")
+        ws_touch.append_row([timestamp_local_str(), "ran", "v4.5.0"], value_input_option="RAW")
         print("[DIAG] Wrote a Debug_Touch row successfully.")
     except Exception as e:
         print(f"[DIAG] Failed to write Debug_Touch: {e}")
@@ -856,6 +845,14 @@ def main():
             name = (str(g.get("name","")) + " " + str(g.get("code",""))).lower()
             if n in name: return g
         return None
+
+    def collect_next_draw_date(draws: List[Dict[str,Any]]) -> str:
+        if not draws: return ""
+        try:
+            nd = draws[0].get("nextDrawDate")
+            return normalize_date(nd)
+        except Exception:
+            return ""
 
     def merge_and_write(game_label: str, ws_title: str, need: int, row_builder):
         ws = get_or_create_worksheet(ss, ws_title, rows=6000, cols=len(RESULT_SCHEMAS[ws_title]))
@@ -874,14 +871,7 @@ def main():
         max_date = merged[0][0] if merged else ""
         print(f"[{game_label}] merged_rows={len(merged)} date_range={min_date} .. {max_date}  -> sheet_tab='{ws_title}'")
 
-        next_draw = ""
-        if draws:
-            try:
-                nd = draws[0].get("nextDrawDate")
-                next_draw = normalize_date(nd)
-            except Exception:
-                next_draw = ""
-        return merged, next_draw
+        return merged, collect_next_draw_date(draws)
 
     merged_pb, next_pb = merge_and_write("Powerball",  "Powerball_Results", 5, pb_rows_from_draws)
     merged_mg, next_mg = merge_and_write("Megabucks",  "Megabucks_Results", 6, mg_rows_from_draws)
@@ -904,6 +894,8 @@ def main():
 
     force = os.getenv("FORCE_PREDICT_TODAY", "0").lower() in ("1","true","yes")
 
+    # Emit new predictions ONLY when a new result arrived (or when forced),
+    # and budget per (Game, NextDrawDate).
     for game_label, merged_rows, next_draw in results:
         if not merged_rows:
             continue
@@ -911,7 +903,7 @@ def main():
         rl = runlog.get(game_label, {"LastResultDate":"", "LastPredictedNextDraw":""})
         prev = normalize_date(rl.get("LastResultDate",""))
         is_new = (latest_date != prev)
-        print(f"[{game_label}] latest_date={latest_date} prev={prev} is_new={is_new} force={force}")
+        print(f"[{game_label}] latest_date={latest_date} prev={prev} is_new={is_new} force={force} next_draw={normalize_date(next_draw) or today_local_str()}")
         if is_new or force:
             if is_new:
                 evaluate_pending_predictions(ss, game_label, merged_rows[0])
@@ -922,7 +914,7 @@ def main():
             write_predictions_for_game(ss, game_label, merged_rows, next_draw)
 
     write_runlog(ss, runlog)
-    print("Success! v4.3.2 finished. See Debug_Touch for this run’s timestamp.")
-    
+    print("Success! v4.5.0 finished. See Debug_Touch for this run’s timestamp.")
+
 if __name__ == "__main__":
     main()
