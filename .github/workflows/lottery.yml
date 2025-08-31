@@ -2,16 +2,16 @@ name: Lottery Automation
 
 on:
   schedule:
-    - cron: "0 8 * * *"   # runs daily at 08:00 UTC
+    # NOTE: GitHub Actions cron runs in **UTC**.
+    # 13:00 UTC ≈ 08:00 America/Chicago during Daylight Saving (CDT).
+    # Adjust if you want a different local time.
+    - cron: "0 13 * * *"
   workflow_dispatch:
 
-concurrency:
-  group: lottery-automation
-  cancel-in-progress: false
-
 jobs:
-  run-lottery:
+  run-script:
     runs-on: ubuntu-latest
+
     permissions:
       contents: read
 
@@ -27,38 +27,35 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install gspread google-auth requests
-          # Optional (only used if ENABLE_LLM_METHOD=1 and OPENAI_API_KEY is set)
-          pip install --upgrade openai
+          pip install pandas numpy requests gspread google-auth openai
 
-      - name: Echo config (masked)
-        shell: bash
-        env:
-          LOCAL_TZ: "America/Chicago"
-          SHEET_ID:        ${{ vars.SHEET_ID }}
-          SHEET_NAME:      ${{ vars.SHEET_NAME }}
-          PREDICTIONS_POWERBALL:  ${{ vars.PREDICTIONS_POWERBALL }}
-          PREDICTIONS_MEGABUCKS:  ${{ vars.PREDICTIONS_MEGABUCKS }}
-          PREDICTIONS_SUPERCASH:  ${{ vars.PREDICTIONS_SUPERCASH }}
-          PREDICTIONS_BADGER5:    ${{ vars.PREDICTIONS_BADGER5 }}
-          PREDICTIONS_PER_GAME:   ${{ vars.PREDICTIONS_PER_GAME }}
-          ENABLE_LLM_METHOD:      ${{ vars.ENABLE_LLM_METHOD }}
-          OPENAI_MODEL:           ${{ vars.OPENAI_MODEL }}
-          WEIGHT_LOOKBACK_DAYS:   ${{ vars.WEIGHT_LOOKBACK_DAYS }}
-          FORCE_PREDICT_TODAY:    ${{ vars.FORCE_PREDICT_TODAY }}
+      # ---- Preflight: ensure required secrets are present ----
+      - name: Preflight env check
         run: |
-          echo "LOCAL_TZ=$LOCAL_TZ"
-          echo "SHEET_ID=$SHEET_ID"
-          echo "SHEET_NAME=$SHEET_NAME"
-          echo "PREDICTIONS_POWERBALL=$PREDICTIONS_POWERBALL"
-          echo "PREDICTIONS_MEGABUCKS=$PREDICTIONS_MEGABUCKS"
-          echo "PREDICTIONS_SUPERCASH=$PREDICTIONS_SUPERCASH"
-          echo "PREDICTIONS_BADGER5=$PREDICTIONS_BADGER5"
-          echo "PREDICTIONS_PER_GAME=$PREDICTIONS_PER_GAME"
-          echo "ENABLE_LLM_METHOD=$ENABLE_LLM_METHOD"
-          echo "OPENAI_MODEL=$OPENAI_MODEL"
-          echo "WEIGHT_LOOKBACK_DAYS=$WEIGHT_LOOKBACK_DAYS"
-          echo "FORCE_PREDICT_TODAY=$FORCE_PREDICT_TODAY"
+          set -e
+          req=(GOOGLE_CREDS_JSON RAPID_API_KEY)
+          if [[ "${ENABLE_LLM_METHOD:-0}" == "1" ]]; then
+            req+=(OPENAI_API_KEY)
+          fi
+
+          fail=0
+          for v in "${req[@]}"; do
+            if [[ -z "${!v}" ]]; then
+              echo "::error title=Missing secret::${v} is missing"; fail=1
+            else
+              echo "${v} is set"
+            fi
+          done
+
+          if [[ $fail -ne 0 ]]; then
+            echo "Preflight failed due to missing secrets."
+            exit 1
+          fi
+        env:
+          GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
+          RAPID_API_KEY:     ${{ secrets.RAPID_API_KEY }}
+          OPENAI_API_KEY:    ${{ secrets.OPENAI_API_KEY }}
+          ENABLE_LLM_METHOD: ${{ vars.ENABLE_LLM_METHOD }}
 
       - name: Run script
         env:
@@ -66,32 +63,23 @@ jobs:
           GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
           RAPID_API_KEY:     ${{ secrets.RAPID_API_KEY }}
 
-          # ---- Timezone (local-day counting) ----
-          LOCAL_TZ: "America/Chicago"
-
-          # ---- Sheet routing (optional) ----
-          SHEET_ID:   ${{ vars.SHEET_ID }}           # preferred: precise targeting
-          SHEET_NAME: ${{ vars.SHEET_NAME }}         # fallback if ID not set
+          # ---- Sheet & timezone ----
+          SHEET_NAME:        ${{ vars.SHEET_NAME }}       # e.g. "Lottery Predictor New August 25"
+          LOCAL_TZ:          America/Chicago              # script will read this if supported
 
           # ---- Core controls ----
           ENABLE_PREDICTIONS: "1"
-          ENABLE_BASELINE: "0"                        # set "1" to include last_draw_baseline
 
-          # ---- Per-game totals ----
-          PREDICTIONS_POWERBALL:  ${{ vars.PREDICTIONS_POWERBALL }}
-          PREDICTIONS_MEGABUCKS:  ${{ vars.PREDICTIONS_MEGABUCKS }}
-          PREDICTIONS_SUPERCASH:  ${{ vars.PREDICTIONS_SUPERCASH }}
-          PREDICTIONS_BADGER5:    ${{ vars.PREDICTIONS_BADGER5 }}
-          PREDICTIONS_PER_GAME:   ${{ vars.PREDICTIONS_PER_GAME }}
+          # ---- Per-game totals (use repo Variables) ----
+          # These names match what your script logs showed (PRED_COUNT_*).
+          PRED_COUNT_POWERBALL:  ${{ vars.PRED_COUNT_POWERBALL }}
+          PRED_COUNT_MEGABUCKS:  ${{ vars.PRED_COUNT_MEGABUCKS }}
+          PRED_COUNT_SUPERCASH:  ${{ vars.PRED_COUNT_SUPERCASH }}
+          PRED_COUNT_BADGER5:    ${{ vars.PRED_COUNT_BADGER5 }}
 
-          # ---- Adaptive/trending controls (optional) ----
-          WEIGHT_LOOKBACK_DAYS:   ${{ vars.WEIGHT_LOOKBACK_DAYS }}
+          # ---- Optional LLM method ----
+          ENABLE_LLM_METHOD: ${{ vars.ENABLE_LLM_METHOD }}   # "1" to enable, "0" to disable
+          OPENAI_API_KEY:    ${{ secrets.OPENAI_API_KEY }}    # only needed if ENABLE_LLM_METHOD="1"
+          OPENAI_MODEL:      ${{ vars.OPENAI_MODEL }}         # e.g., gpt-4o-mini
 
-          # ---- LLM method (optional) ----
-          ENABLE_LLM_METHOD:  ${{ vars.ENABLE_LLM_METHOD }}   # "1" or "0"
-          OPENAI_API_KEY:     ${{ secrets.OPENAI_API_KEY }}    # only needed if enabled
-          OPENAI_MODEL:       ${{ vars.OPENAI_MODEL }}         # e.g., gpt-4o-mini
-
-          # ---- Testing switch (optional) ----
-          FORCE_PREDICT_TODAY: ${{ vars.FORCE_PREDICT_TODAY }} # "1" to force new rows today
-        run: python -u main.py
+        run: python main.py
