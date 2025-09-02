@@ -18,6 +18,7 @@ jobs:
       - name: Run predictions
         env:
           GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
+          RAPID_API_KEY:     ${{ secrets.RAPID_API_KEY }}  # <-- add this
           SHEET_NAME: Lottery Predictor New August 25
           ENABLE_PREDICTIONS: "1"
           PRED_COUNT_POWERBALL: "5"
