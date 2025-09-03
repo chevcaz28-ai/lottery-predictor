@@ -2,12 +2,13 @@ name: Run Lottery Predictor
 
 on:
   schedule:
-    - cron: "30 4 * * *"  # Runs every day at 04:30 UTC (11:30 PM CST)
-  workflow_dispatch:  # Allows manual trigger from GitHub Actions tab
+    - cron: "30 4 * * *"  # Runs every day at 04:30 UTC (≈ 11:30 PM America/Chicago)
+  workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -24,9 +25,25 @@ jobs:
 
       - name: Run script
         env:
+          # Required secrets
           GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
           RAPID_API_KEY:      ${{ secrets.RAPID_API_KEY }}
-          # Disable baseline predictions so the last-draw numbers are not emitted
+
+          # Sheet and timezone settings
+          SHEET_NAME:         ${{ vars.SHEET_NAME }}      # e.g. "Lottery Predictor New August 25"
+          LOCAL_TZ:           America/Chicago
+
+          # Prediction control
+          ENABLE_PREDICTIONS: "1"
+          PREDICTIONS_POWERBALL:  ${{ vars.PRED_COUNT_POWERBALL }}
+          PREDICTIONS_MEGABUCKS:  ${{ vars.PRED_COUNT_MEGABUCKS }}
+          PREDICTIONS_SUPERCASH:  ${{ vars.PRED_COUNT_SUPERCASH }}
+          PREDICTIONS_BADGER5:    ${{ vars.PRED_COUNT_BADGER5 }}
           ENABLE_BASELINE:    "0"
+
+          # Optional LLM support (set vars.ENABLE_LLM_METHOD to "1" to enable)
+          ENABLE_LLM_METHOD:  ${{ vars.ENABLE_LLM_METHOD }}
+          OPENAI_API_KEY:     ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL:       ${{ vars.OPENAI_MODEL }}
         run: |
           python main.py
