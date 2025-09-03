@@ -21,8 +21,8 @@ jobs:
           RAPID_API_KEY:     ${{ secrets.RAPID_API_KEY }}  # <-- add this
           SHEET_NAME: Lottery Predictor New August 25
           ENABLE_PREDICTIONS: "1"
-          PRED_COUNT_POWERBALL: "5"
-          PRED_COUNT_MEGABUCKS: "10"
-          PRED_COUNT_SUPERCASH: "10"
-          PRED_COUNT_BADGER5: "10"
+          PREDICTIONS_POWERBALL:  ${{ vars.PRED_COUNT_POWERBALL }}
+          PREDICTIONS_MEGABUCKS:  ${{ vars.PRED_COUNT_MEGABUCKS }}
+          PREDICTIONS_SUPERCASH:  ${{ vars.PRED_COUNT_SUPERCASH }}
+          PREDICTIONS_BADGER5:    ${{ vars.PRED_COUNT_BADGER5 }}
         run: python main.py
