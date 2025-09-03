@@ -72,10 +72,10 @@ jobs:
 
           # ---- Per-game totals (use repo Variables) ----
           # These names match what your script logs showed (PRED_COUNT_*).
-          PRED_COUNT_POWERBALL:  ${{ vars.PRED_COUNT_POWERBALL }}
-          PRED_COUNT_MEGABUCKS:  ${{ vars.PRED_COUNT_MEGABUCKS }}
-          PRED_COUNT_SUPERCASH:  ${{ vars.PRED_COUNT_SUPERCASH }}
-          PRED_COUNT_BADGER5:    ${{ vars.PRED_COUNT_BADGER5 }}
+          PREDICTIONS_POWERBALL:  ${{ vars.PRED_COUNT_POWERBALL }}
+          PREDICTIONS_MEGABUCKS:  ${{ vars.PRED_COUNT_MEGABUCKS }}
+          PREDICTIONS_SUPERCASH:  ${{ vars.PRED_COUNT_SUPERCASH }}
+          PREDICTIONS_BADGER5:    ${{ vars.PRED_COUNT_BADGER5 }}
 
           # ---- Optional LLM method ----
           ENABLE_LLM_METHOD: ${{ vars.ENABLE_LLM_METHOD }}   # "1" to enable, "0" to disable
