@@ -34,6 +34,7 @@ jobs:
           LOCAL_TZ:           America/Chicago
 
           # Prediction control
+          FORCE_PREDICT_TODAY: ${{ vars.FORCE_PREDICT_TODAY }}
           ENABLE_PREDICTIONS: "1"
           PREDICTIONS_POWERBALL:  ${{ vars.PRED_COUNT_POWERBALL }}
           PREDICTIONS_MEGABUCKS:  ${{ vars.PRED_COUNT_MEGABUCKS }}
