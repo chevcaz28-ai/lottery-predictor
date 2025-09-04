@@ -21,6 +21,7 @@ jobs:
           RAPID_API_KEY:     ${{ secrets.RAPID_API_KEY }}  # <-- add this
           SHEET_NAME: Lottery Predictor New August 25
           ENABLE_PREDICTIONS: "1"
+          FORCE_PREDICT_TODAY: ${{ vars.FORCE_PREDICT_TODAY }}
           PREDICTIONS_POWERBALL:  ${{ vars.PRED_COUNT_POWERBALL }}
           PREDICTIONS_MEGABUCKS:  ${{ vars.PRED_COUNT_MEGABUCKS }}
           PREDICTIONS_SUPERCASH:  ${{ vars.PRED_COUNT_SUPERCASH }}
