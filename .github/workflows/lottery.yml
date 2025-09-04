@@ -68,6 +68,7 @@ jobs:
           LOCAL_TZ:          America/Chicago              # script will read this if supported
 
           # ---- Core controls ----
+          FORCE_PREDICT_TODAY: ${{ vars.FORCE_PREDICT_TODAY }}
           ENABLE_PREDICTIONS: "1"
           # Disable baseline predictions so the last-draw numbers are not emitted
           ENABLE_BASELINE:    "0"
