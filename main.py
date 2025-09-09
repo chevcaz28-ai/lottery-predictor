@@ -328,30 +328,59 @@ def recency_method(rows: List[List[Any]], need:int, lo:int, hi:int, decay:float=
     base = [k for k,_ in ranked][:need]
     return unique_combo(base, need, lo, hi)
 
-def markov1_method(rows: List[List[Any]], need:int, lo:int, hi:int) -> List[int]:
+def markov1_method(rows: List[List[Any]], need: int, lo: int, hi: int) -> List[int]:
+    """
+    Build a simple first‑order Markov prediction based on historical draws.
+    The old version collected candidates and then sorted them, which biased
+    the result toward the smallest numbers.  Instead, we aggregate transition
+    counts per candidate and choose the top 'need' numbers by frequency.
+    """
+    # Flatten main numbers into a sequence.
     seq = []
     for r in rows:
         for v in r[1:1+need]:
             try:
-                v=int(v)
-                if lo<=v<=hi: seq.append(v)
-            except: pass
-    trans = {i:{} for i in range(lo,hi+1)}
-    for a,b in zip(seq, seq[1:]):
-        trans[a][b] = trans[a].get(b,0)+1
-    seed = []
+                iv = int(v)
+            except Exception:
+                continue
+            if lo <= iv <= hi:
+                seq.append(iv)
+
+    # Build transition counts.
+    trans = {i: {} for i in range(lo, hi+1)}
+    for a, b in zip(seq, seq[1:]):
+        trans[a][b] = trans[a].get(b, 0) + 1
+
+    # Use recent draws as seeds.
+    seeds = []
     for r in rows[:3]:
         for v in r[1:1+need]:
             try:
-                v=int(v)
-                if lo<=v<=hi and v not in seed:
-                    seed.append(v)
-            except: pass
-    cand = []
-    for s in seed:
-        nxt = sorted(trans.get(s, {}).items(), key=lambda kv: (-kv[1], kv[0]))
-        cand.extend([k for k,_ in nxt[:2]])
-    return unique_combo(cand, need, lo, hi)
+                iv = int(v)
+            except Exception:
+                continue
+            if lo <= iv <= hi and iv not in seeds:
+                seeds.append(iv)
+
+    # Accumulate candidate counts from the seeds.
+    candidate_counts = {}
+    for s in seeds:
+        for nxt, cnt in trans.get(s, {}).items():
+            candidate_counts[nxt] = candidate_counts.get(nxt, 0) + cnt
+
+    # Take the top 'need' numbers by count (ties broken by the number value).
+    ranked = sorted(candidate_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    base = [k for k, _ in ranked[:need]]
+
+    # Fill with unique random values if we didn’t get enough candidates.
+    base_set = set(base)
+    while len(base_set) < need:
+        x = random.randint(lo, hi)
+        if x not in base_set:
+            base_set.add(x)
+
+    # Return the result sorted for consistency with other methods.
+    return sorted(base_set)
 
 def pick_powerball(rows: List[List[Any]]) -> int:
     hist = {}
