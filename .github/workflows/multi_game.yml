@@ -1,23 +1,25 @@
 name: Multi-game Runner
 
 on:
+  # Nightly schedule (adjust as needed). 01:30 UTC = 8:30 PM previous day CT.
   schedule:
-    - cron: "30 1 * * *"   # example: 01:30 UTC daily (8:30 PM previous day CT)
+    - cron: "30 1 * * *"
+  # Enables the "Run workflow" button in GitHub Actions
   workflow_dispatch:
     inputs:
       games_list:
-        description: Comma-separated list of games
+        description: Comma-separated list of games (overrides default)
         required: false
       predictions_per_run:
-        description: Number of predictions per game
+        description: Predictions per game (overrides default)
         required: false
       methods:
-        description: Methods (comma-separated)
+        description: Methods (comma-separated, overrides default)
         required: false
 
 env:
   LOCAL_TZ: America/Chicago
-  # Defaults; can be overridden via "Run workflow" inputs
+  # Defaults (can be overridden via workflow_dispatch inputs)
   GAMES_LIST: "Badger 5,Super Cash,Megabucks,Powerball"
   PREDICTIONS_PER_RUN: "20"
   METHODS: "baseline,decay,dirichlet,order2_backoff"
@@ -40,12 +42,21 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps (if requirements.txt exists)
-        run: |
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          fi
+      # Optional cache to speed up installs
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Allow manual overrides from the "Run workflow" UI
       - name: Apply workflow inputs (optional overrides)
         run: |
           if [ -n "${{ github.event.inputs.games_list }}" ]; then
@@ -58,17 +69,33 @@ jobs:
             echo "METHODS=${{ github.event.inputs.methods }}" >> $GITHUB_ENV
           fi
 
+      # Service account JSON for Google Sheets access (must be set in repo Secrets)
       - name: Decode GCP service account (for Google Sheets)
-        if: ${{ env.GCP_SERVICE_ACCOUNT_JSON != '' }}
         env:
           GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
         run: |
           echo "$GCP_SERVICE_ACCOUNT_JSON" > service_account.json
 
+      - name: Verify required imports (fail early if something's missing)
+        run: |
+          python - <<'PY'
+          import sys
+          mods = ["pytz","pandas","numpy","requests","gspread","google.auth","sklearn"]
+          missing = []
+          for m in mods:
+            try:
+              __import__(m)
+            except Exception as e:
+              missing.append(f"{m}: {e}")
+          if missing:
+            print("Missing/failed imports:\n" + "\n".join(missing))
+            sys.exit(1)
+          print("All required imports OK")
+          PY
+
       - name: Run multi_game_main.py
         env:
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME }}
-          # Add any other secrets your script expects (e.g., RAPIDAPI_KEY, etc.)
         run: |
           python multi_game_main.py
