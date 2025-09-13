@@ -51,10 +51,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+- name: Install dependencies
+  run: |
+    python -m pip install --upgrade pip
+    if [ -f requirements.txt ]; then
+      pip install -r requirements.txt
+    else
+      pip install gspread google-auth pandas numpy requests scikit-learn pytz
+    fi
 
       # Allow manual overrides from the "Run workflow" UI
       - name: Apply workflow inputs (optional overrides)
