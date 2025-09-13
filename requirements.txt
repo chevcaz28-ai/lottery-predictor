@@ -1,0 +1,7 @@
+gspread
+google-auth
+pandas
+numpy
+requests
+scikit-learn
+pytz
