@@ -4,4 +4,4 @@ pandas
 numpy
 requests
 scikit-learn
-pytz==2024.1
+pytz
