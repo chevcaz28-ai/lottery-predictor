@@ -1,0 +1,13 @@
+GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
+GOOGLE_SHEET_ID:          ${{ secrets.GOOGLE_SHEET_ID }}
+GOOGLE_SHEET_NAME:        ${{ secrets.GOOGLE_SHEET_NAME }}
+LOCAL_TZ:                 America/Chicago
+GAMES_LIST:               "Badger 5,Super Cash,Megabucks,Powerball"
+PREDICTIONS_PER_RUN:      "20"
+METHODS:                  "baseline,decay,dirichlet,order2_backoff"
+DECAY_HALF_LIFE_DRAWS:    "365"
+DIRICHLET_ALPHA:          "1.0"
+BACKOFF_LAMBDA:           "0.6"
+LAPLACE_ALPHA:            "0.5"
+SOFTMAX_TAU:              "1.0"
+NO_CONSEC_LIMIT:          "3"
