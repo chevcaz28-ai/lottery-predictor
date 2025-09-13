@@ -65,6 +65,7 @@ import datetime as dt
 import pytz
 import gspread
 from google.oauth2.service_account import Credentials
+from collections import Counter, defaultdict
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -79,6 +80,20 @@ GAMES_LIST = [g.strip() for g in os.getenv("GAMES_LIST", "Badger 5,Super Cash,Me
 
 # Number of predictions per game per run
 PREDICTIONS_PER_RUN = int(os.getenv("PREDICTIONS_PER_RUN", "20"))
+
+# Allow multiple prediction methods.  A comma-separated list of method names:
+#   baseline       : first-order Markov with Laplace smoothing (default)
+#   decay          : exponential time-decay weighting for transitions
+#   dirichlet      : first-order Markov with Dirichlet smoothing
+#   order2_backoff : second-order Markov with backoff to first order
+METHODS = [m.strip().lower() for m in os.getenv(
+    "METHODS", "baseline"
+).split(",") if m.strip()]
+
+# Hyperparameters for the additional methods
+DECAY_HALF_LIFE_DRAWS = int(os.getenv("DECAY_HALF_LIFE_DRAWS", "365"))
+DIRICHLET_ALPHA = float(os.getenv("DIRICHLET_ALPHA", "1.0"))
+BACKOFF_LAMBDA = float(os.getenv("BACKOFF_LAMBDA", "0.6"))
 
 # Markov parameters
 LAPLACE_ALPHA = float(os.getenv("LAPLACE_ALPHA", "0.5"))
@@ -361,35 +376,212 @@ def too_many_consecutives(nums: List[int], limit: int) -> bool:
                 return True
     return False
 
+# ---------------------------------------------------------------------------
+# Additional helper functions for advanced Markov methods
 
-def generate_mains(history: List[List[int]], need: int, lo: int, hi: int) -> List[int]:
-    """Generate a main-number prediction via a position-wise Markov chain."""
+def global_freq_prior(history: List[List[int]], lo: int, hi: int) -> Dict[int, float]:
+    """Return a normalized frequency prior for Dirichlet smoothing.
+
+    If history is empty, returns a uniform prior.  Otherwise returns the
+    empirical frequency of each number across all positions.
+    """
+    if not history:
+        u = 1.0 / (hi - lo + 1)
+        return {x: u for x in range(lo, hi + 1)}
+    c = Counter()
+    for row in history:
+        c.update(row)
+    total = sum(c.values())
+    if total <= 0:
+        u = 1.0 / (hi - lo + 1)
+        return {x: u for x in range(lo, hi + 1)}
+    return {x: (c.get(x, 0) / total) for x in range(lo, hi + 1)}
+
+
+def next_distribution_dirichlet(
+    counts_for_pos: Dict[int, Dict[int, int]],
+    prev: int,
+    lo: int,
+    hi: int,
+    alpha_total: float,
+    prior: Dict[int, float],
+) -> Dict[int, float]:
+    """Compute a Dirichlet-smoothed distribution using a data-driven prior."""
+    row = counts_for_pos.get(prev, {})
+    denom = sum(row.values()) + alpha_total
+    # Avoid division by zero
+    denom = max(denom, 1e-12)
+    out: Dict[int, float] = {}
+    for x in range(lo, hi + 1):
+        out[x] = (row.get(x, 0) + alpha_total * prior.get(x, 0.0)) / denom
+    return out
+
+
+def train_decay_counts(history: List[List[int]], need: int, half_life_draws: int) -> List[Dict[int, Dict[int, float]]]:
+    """Return decayed transition counts for each position.
+
+    Each transition's contribution decays exponentially with a half-life of
+    `half_life_draws` draws.  The most recent transitions contribute full weight.
+    """
+    lam = 0.5 ** (1.0 / max(half_life_draws, 1))
+    counts: List[Dict[int, Dict[int, float]]] = [defaultdict(lambda: defaultdict(float)) for _ in range(need)]
+    # chronological (oldest first)
+    hist = list(reversed(history))
+    for a_row, b_row in zip(hist, hist[1:]):
+        for pos in range(need):
+            table = counts[pos]
+            # Decay existing entries
+            for a in list(table.keys()):
+                for b in list(table[a].keys()):
+                    table[a][b] *= lam
+                    if table[a][b] < 1e-12:
+                        del table[a][b]
+                if not table[a]:
+                    del table[a]
+            # Add new transition
+            a = a_row[pos]
+            b = b_row[pos]
+            table[a][b] += 1.0
+    # Convert nested defaultdict to plain dict
+    result: List[Dict[int, Dict[int, float]]] = []
+    for pos in range(need):
+        result.append({a: dict(bs) for a, bs in counts[pos].items()})
+    return result
+
+
+def train_order2_counts(history: List[List[int]], need: int) -> List[Dict[Tuple[int, int], Dict[int, int]]]:
+    """Train second-order transition counts for each position."""
+    counts2: List[Dict[Tuple[int, int], Dict[int, int]]] = [dict() for _ in range(need)]
+    hist = list(reversed(history))
+    for i in range(2, len(hist)):
+        a2_row, a1_row, b_row = hist[i - 2], hist[i - 1], hist[i]
+        for pos in range(need):
+            key = (a2_row[pos], a1_row[pos])
+            d = counts2[pos].setdefault(key, {})
+            nxt = b_row[pos]
+            d[nxt] = d.get(nxt, 0) + 1
+    return counts2
+
+
+def backoff_order2_distribution(
+    counts2_for_pos: Dict[Tuple[int, int], Dict[int, int]],
+    counts1_for_pos: Dict[int, Dict[int, int]],
+    prev2: int,
+    prev1: int,
+    lo: int,
+    hi: int,
+    lam_backoff: float,
+    alpha: float,
+) -> Dict[int, float]:
+    """Compute an interpolated distribution from second- and first-order counts."""
+    row2 = counts2_for_pos.get((prev2, prev1), {})
+    denom2 = sum(row2.values())
+    p2: Dict[int, float] = {}
+    if denom2 > 0:
+        p2 = {x: (row2.get(x, 0) / denom2) for x in range(lo, hi + 1)}
+    else:
+        p2 = {x: 0.0 for x in range(lo, hi + 1)}
+    p1 = next_distribution(counts1_for_pos, prev1, lo, hi, alpha)
+    out: Dict[int, float] = {}
+    for x in range(lo, hi + 1):
+        out[x] = lam_backoff * p2[x] + (1.0 - lam_backoff) * p1[x]
+    return out
+
+
+def generate_mains(
+    history: List[List[int]],
+    need: int,
+    lo: int,
+    hi: int,
+    method: str = "baseline",
+) -> List[int]:
+    """Generate a main-number prediction using the specified method.
+
+    Supported methods:
+      baseline       : first-order Markov with Laplace smoothing
+      decay          : time-decay weighting with Laplace smoothing
+      dirichlet      : first-order Markov with Dirichlet smoothing
+      order2_backoff : second-order Markov with backoff to first order
+
+    If history is empty, returns a random unique set of numbers.
+    """
     if not history:
         s: set[int] = set()
         while len(s) < need:
             s.add(random.randint(lo, hi))
         return sorted(s)
-    counts = train_markov_positionwise(history, need)
+    # Seed row for context
     seed_row = history[0]
-    picks: List[int] = []
     used: set[int] = set()
+    picks: List[int] = []
+
+    # Precompute model-specific objects
+    if method == "baseline":
+        counts1 = train_markov_positionwise(history, need)
+
+        def dist_for_pos(pos: int) -> Dict[int, float]:
+            return next_distribution(counts1[pos], seed_row[pos], lo, hi, LAPLACE_ALPHA)
+
+    elif method == "decay":
+        dcounts = train_decay_counts(history, need, DECAY_HALF_LIFE_DRAWS)
+
+        def dist_for_pos(pos: int) -> Dict[int, float]:
+            row = dcounts[pos].get(seed_row[pos], {})
+            denom = sum(row.values()) + LAPLACE_ALPHA * (hi - lo + 1)
+            # If denom is zero, treat as uniform
+            denom = max(denom, 1e-12)
+            return {x: (row.get(x, 0.0) + LAPLACE_ALPHA) / denom for x in range(lo, hi + 1)}
+
+    elif method == "dirichlet":
+        counts1 = train_markov_positionwise(history, need)
+        prior = global_freq_prior(history, lo, hi)
+
+        def dist_for_pos(pos: int) -> Dict[int, float]:
+            return next_distribution_dirichlet(
+                counts1[pos], seed_row[pos], lo, hi, DIRICHLET_ALPHA, prior
+            )
+
+    elif method == "order2_backoff":
+        counts1 = train_markov_positionwise(history, need)
+        counts2 = train_order2_counts(history, need)
+        prev2_row = history[1] if len(history) > 1 else seed_row
+
+        def dist_for_pos(pos: int) -> Dict[int, float]:
+            return backoff_order2_distribution(
+                counts2[pos],
+                counts1[pos],
+                prev2_row[pos],
+                seed_row[pos],
+                lo,
+                hi,
+                BACKOFF_LAMBDA,
+                LAPLACE_ALPHA,
+            )
+
+    else:
+        # Unknown method falls back to baseline
+        counts1 = train_markov_positionwise(history, need)
+
+        def dist_for_pos(pos: int) -> Dict[int, float]:
+            return next_distribution(counts1[pos], seed_row[pos], lo, hi, LAPLACE_ALPHA)
+
+    # Sample one number per position
     for pos in range(need):
-        prev = seed_row[pos]
-        dist_raw = next_distribution(counts[pos], prev, lo, hi, LAPLACE_ALPHA)
+        probs = dist_for_pos(pos)
         # Exclude already chosen numbers
         for u in list(used):
-            if u in dist_raw:
-                dist_raw[u] = 0.0
-        dist = softmax(dist_raw, SOFTMAX_TAU)
-        # normalise after zeroing
+            if u in probs:
+                probs[u] = 0.0
+        dist = softmax(probs, SOFTMAX_TAU)
         Z = sum(p for _, p in dist) or 1.0
         dist = [(k, p / Z) for k, p in dist]
         choice = categorical_sample(dist)
         picks.append(choice)
         used.add(choice)
-    # enforce no long consecutive runs
+    # Enforce no long consecutive runs
     if NO_CONSEC_LIMIT and too_many_consecutives(picks, NO_CONSEC_LIMIT):
-        return generate_mains(history, need, lo, hi)
+        # Retry once with baseline to avoid infinite loops
+        return generate_mains(history, need, lo, hi, method="baseline")
     return sorted(picks)
 
 
@@ -546,13 +738,23 @@ def autoscore_latest_if_ready(
         ws.update_cell(row_idx, i_mcnt + 1, mcnt)
 
 
-def append_predictions(sheet: gspread.Spreadsheet, game_name: str, next_draw_date: str, pred_strings: List[str]) -> None:
-    """Append new prediction rows to Prediction_Tracker."""
+def append_predictions(
+    sheet: gspread.Spreadsheet,
+    game_name: str,
+    next_draw_date: str,
+    pred_strings: List[str],
+    methods: List[str],
+) -> None:
+    """Append new prediction rows to Prediction_Tracker.
+
+    Each prediction string in pred_strings should correspond to a method name in methods.
+    The method label is written to the Method column.
+    """
     ws = ensure_tracker(sheet)
     ts = now_local_str()
     rows: List[List[Any]] = []
-    for pstr in pred_strings:
-        rows.append([ts, game_name, next_draw_date, pstr, "markov_v2", "0", "", ""])
+    for pstr, mth in zip(pred_strings, methods):
+        rows.append([ts, game_name, next_draw_date, pstr, mth, "0", "", ""])
     if rows:
         ws.append_rows(rows, value_input_option="RAW")
 
@@ -585,18 +787,21 @@ def run_game(sheet: gspread.Spreadsheet, game_name: str) -> None:
     mains_hist, bonus_hist = load_history(sheet, tab, need, has_bonus, bonus_count)
     # Determine next draw date
     next_draw_date = lookup_next_draw_date(sheet, game_name)
-    # Generate predictions
+    # Generate predictions for each configured method
     pred_strings: List[str] = []
-    for _ in range(max(1, PREDICTIONS_PER_RUN)):
-        mains = generate_mains(mains_hist, need, lo, hi)
-        if has_bonus and bonus_lo is not None and bonus_hi is not None and bonus_count > 0:
-            bonus = generate_bonus(bonus_hist, bonus_lo, bonus_hi)
-            pred_strings.append(fmt_prediction_powerball(mains, bonus))
-        else:
-            pred_strings.append(fmt_prediction_mains(mains))
-    # Append predictions
-    append_predictions(sheet, game_name, next_draw_date, pred_strings)
-    print(f"[{game_name}] wrote {len(pred_strings)} predictions (next draw: {next_draw_date})")
+    pred_methods: List[str] = []
+    for method in METHODS:
+        for _ in range(max(1, PREDICTIONS_PER_RUN)):
+            mains = generate_mains(mains_hist, need, lo, hi, method=method)
+            if has_bonus and bonus_lo is not None and bonus_hi is not None and bonus_count > 0:
+                bonus = generate_bonus(bonus_hist, bonus_lo, bonus_hi)
+                pred_strings.append(fmt_prediction_powerball(mains, bonus))
+            else:
+                pred_strings.append(fmt_prediction_mains(mains))
+            pred_methods.append(method)
+    # Append predictions with method labels
+    append_predictions(sheet, game_name, next_draw_date, pred_strings, pred_methods)
+    print(f"[{game_name}] wrote {len(pred_strings)} predictions across methods: {', '.join(METHODS)} (next draw: {next_draw_date})")
 
 
 def main() -> None:
