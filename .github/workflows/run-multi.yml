@@ -37,7 +37,7 @@ jobs:
           # GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
 
           # Sheet ID can be a repo Variable or Secret; use whichever you have set:
-          GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID || vars.GOOGLE_SHEET_ID }}
           # If you used a secret instead of a var, use:
           # GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
 
