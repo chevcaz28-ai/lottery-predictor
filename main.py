@@ -783,7 +783,7 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
     # Base picks (one per enabled method)
     methods: Dict[str, Tuple[List[int], Optional[int]]] = {}
         # Apply per-game method disables (optional, backward-compatible)
-        _dis = disabled_methods_for_game(game)
+            _dis = disabled_methods_for_game(game)
 
     if os.getenv("ENABLE_BASELINE","1").lower() in ("1","true","yes"):
         methods["last_draw_baseline"] = (rows_hist[0][1:1+need] if rows_hist else [], None)
