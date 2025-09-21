@@ -783,16 +783,16 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
     # Base picks (one per enabled method)
     methods: Dict[str, Tuple[List[int], Optional[int]]] = {}
         # Apply per-game method disables (optional, backward-compatible)
-            _dis = disabled_methods_for_game(game)
-
+            _dis = disabled_methods_for_game(game
     if os.getenv("ENABLE_BASELINE","1").lower() in ("1","true","yes"):
-        methods["last_draw_baseline"] = (rows_hist[0][1:1+need] if rows_hist else [], None)
+methodsd"last_draw_baseline"] = (rows_hist[0][1:1+need] if rows_hist else [], None)
     methods["freq50"]  = (freq_method(rows_hist, need, lo, hi, window=50), None)
     methods["recency"] = (recency_method(rows_hist, need, lo, hi, decay=0.92), None)
     methods["markov1"] = (markov1_method(rows_hist, need, lo, hi), None)
-        for _m in list(methods.keys()):
+      for _m in list(methods.keys()):
+       
             if _m in _dis:
-                methods.pop(_m, None)
+            methods.pop(_m, None)
 
     special_pb = pick_powerball(rows_hist) if game=="Powerball" else None
 
@@ -820,7 +820,7 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
         if latest_mains:
             same_mains = sorted(nums_int) == sorted(latest_mains)
             if game == "Powerball":
-                same_special = (special == latest_special) if latest_special is not None else True
+               same_special = (special == latest_special) if latest_special is not None else True
                 if same_mains and same_special:
                     return False
             else:
