@@ -46,18 +46,27 @@ jobs:
       - name: Run script (all predictions + Markov)
         run: python main.py
         env:
+          # 🔐 Secrets (keep as secrets)
           GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
-          RAPID_API_KEY: ${{ secrets.RAPID_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          SHEET_NAME: Lottery Predictor New August 25
-          LOCAL_TZ: America/Chicago
-          FORCE_PREDICT_TODAY: "0"
-          ENABLE_PREDICTIONS: "1"
-          ENABLE_BASELINE: "0"
-          ENABLE_LLM_METHOD: "1"
-          ENABLE_MARKOV_METHOD: "1"              # 👈 new flag
-          PREDICTIONS_POWERBALL: "5"
-          PREDICTIONS_MEGABUCKS: "10"
-          PREDICTIONS_SUPERCASH: "10"
-          PREDICTIONS_BADGER5: "5"
-          OPENAI_MODEL: gpt-4o-mini
+          RAPID_API_KEY:      ${{ secrets.RAPID_API_KEY }}
+          OPENAI_API_KEY:     ${{ secrets.OPENAI_API_KEY }}
+
+          # 🏷️ Repo Variables (Settings → Variables)
+          SHEET_NAME:         ${{ vars.SHEET_NAME        || 'Lottery Predictor New August 25' }}
+          LOCAL_TZ:           ${{ vars.LOCAL_TZ          || 'America/Chicago' }}
+
+          # Toggles (repo vars with sensible defaults)
+          FORCE_PREDICT_TODAY: ${{ vars.FORCE_PREDICT_TODAY || '0' }}
+          ENABLE_PREDICTIONS:  ${{ vars.ENABLE_PREDICTIONS  || '1' }}
+          ENABLE_BASELINE:     ${{ vars.ENABLE_BASELINE     || '0' }}
+          ENABLE_LLM_METHOD:   ${{ vars.ENABLE_LLM_METHOD   || '1' }}
+          ENABLE_MARKOV_METHOD: ${{ vars.ENABLE_MARKOV_METHOD|| '1' }}
+
+          # Counts (per game) — override in repo vars as needed
+          PREDICTIONS_POWERBALL: ${{ vars.PREDICTIONS_POWERBALL || '5' }}
+          PREDICTIONS_MEGABUCKS: ${{ vars.PREDICTIONS_MEGABUCKS || '10' }}
+          PREDICTIONS_SUPERCASH: ${{ vars.PREDICTIONS_SUPERCASH || '10' }}
+          PREDICTIONS_BADGER5:   ${{ vars.PREDICTIONS_BADGER5   || '5' }}
+
+          # Model (only used if ENABLE_LLM_METHOD == 1)
+          OPENAI_MODEL:        ${{ vars.OPENAI_MODEL || 'gpt-4o-mini' }}
