@@ -1,0 +1,68 @@
+name: Run Lottery Predictor
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "10 3 * * *"   # example
+
+jobs:
+  run-script:
+    # If your secrets are stored in an Environment (e.g., "prod"), uncomment:
+    # environment: prod
+
+    runs-on: ubuntu-24.04
+
+    # 🔒 Map repo/env secrets into real environment variables for this job
+    env:
+      GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
+      RAPID_API_KEY:     ${{ secrets.RAPID_API_KEY }}
+      # Turn on only if you want to require OpenAI
+      ENABLE_LLM_METHOD: "0"
+      OPENAI_API_KEY:    ${{ secrets.OPENAI_API_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy requests gspread google-auth openai
+
+      # Optional but recommended: write the Google JSON to a file for libs that look for GOOGLE_APPLICATION_CREDENTIALS
+      - name: Write Google creds to file
+        run: |
+          printf '%s' "$GOOGLE_CREDS_JSON" > creds.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$PWD/creds.json" >> "$GITHUB_ENV"
+
+      # ✅ Preflight (correct parameter expansion & indirection)
+      - name: Preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          req=(GOOGLE_CREDS_JSON RAPID_API_KEY)
+          if [[ "${ENABLE_LLM_METHOD:-0}" == "1" ]]; then
+            req+=(OPENAI_API_KEY)
+          fi
+
+          fail=0
+          for v in "${req[@]}"; do
+            val="${!v:-}"     # indirection: read the value of the var named in $v
+            if [[ -z "$val" ]]; then
+              echo "::error title=Missing secret::$v is missing"; fail=1
+            else
+              echo "$v is set"
+            fi
+          done
+
+          if [[ $fail -ne 0 ]]; then
+            echo "Preflight failed due to missing secrets."
+            exit 1
+          fi
+
+      - name: Run predictor
+        run: |
+          python main.py
