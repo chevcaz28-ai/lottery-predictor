@@ -1,0 +1,62 @@
+name: Py Compile Check
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Helpful diagnostics so you can see exactly what file CI is compiling
+      - name: Show commit & file stats
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== Commit and workspace ==="
+          git rev-parse HEAD
+          git status
+          echo "=== Python files present ==="
+          find . -name "*.py" -print | sort
+          echo "=== main.py stats (if present) ==="
+          if [[ -f main.py ]]; then
+            wc -l main.py || true
+            echo "--- context around line 786 (if exists) ---"
+            nl -ba main.py | sed -n '776,796p' || true
+            echo "--- md5 of main.py ---"
+            md5sum main.py || true
+          else
+            echo "main.py not found at repo root."
+          fi
+
+      # Fail fast if there are TABs lurking (common cause of “unexpected indent”)
+      - name: Check for TABs in Python files
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -nP $'\t' -R --include='*.py' . ; then
+            echo "::error title=Tabs found::Use spaces instead of tabs in .py files"
+            exit 1
+          fi
+          echo "No TAB characters detected in .py files."
+
+      # Compile *all* Python files to catch errors anywhere, not just main.py
+      - name: Syntax check all Python
+        shell: bash
+        run: |
+          set -euo pipefail
+          # print what we'll compile
+          find . -name "*.py" -print0 | xargs -0 -I{} echo "Compiling {}"
+          # compile
+          find . -name "*.py" -print0 | xargs -0 python -m py_compile
+          echo "All Python files compiled successfully."
