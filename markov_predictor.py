@@ -56,7 +56,12 @@ def today_local_str(tzname: str) -> str:
 
 # ---------- Sheets I/O ----------
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+# ✅ Option A: include Drive read-only scope so gc.open(<sheet_name>) can search Drive
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive.readonly",
+]
+
 def open_sheet(sheet_name: str):
     creds_json = os.environ["GOOGLE_CREDS_JSON"]
     info = json.loads(creds_json)
@@ -254,7 +259,7 @@ def run_for_game(ss, game: str, emit_count: int, temp: float, smooth: float, met
     last = hist[0]  # assuming row 2 is newest in your sheets (same as main.py)
     combos = []
     for _ in range(emit_count):
-        picks = markov_pick(last, T, prior, n_numbers=n_numbers, max_num=max_num, temperature=temp)
+        picks = markov_pick(last, T, prior, n_numbers=numbers_per_draw := n_numbers, max_num=max_num, temperature=temp)
         combos.append(picks)
 
     # Best effort to get next draw date: use today if uncertain (keeps writer happy)
