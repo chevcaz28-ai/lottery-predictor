@@ -3,65 +3,48 @@ name: Run Lottery Predictor
 on:
   workflow_dispatch:
   schedule:
-    - cron: "10 3 * * *"   # 03:10 UTC
+    - cron: "10 3 * * *"   # runs daily at 03:10 UTC
 
 jobs:
   run-script:
-    # If your secrets live in an Environment (e.g., "prod"), uncomment:
-    # environment: prod
-
     runs-on: ubuntu-24.04
 
-    # Map repo/env secrets into env vars used by your script & preflight
     env:
       GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
       RAPID_API_KEY:     ${{ secrets.RAPID_API_KEY }}
-      ENABLE_LLM_METHOD: "0"                 # set "1" only if you truly require OpenAI
-      OPENAI_API_KEY:    ${{ secrets.OPENAI_API_KEY }}
+      SHEET_NAME: "Lottery Predictor New August 25"
+      LOCAL_TZ: "America/Chicago"
+      ENABLE_MARKOV_METHOD: "1"
+      MARKOV_METHOD_NAME: "markov"
+      MARKOV_TEMP: "0.7"
+      MARKOV_SMOOTH: "1.0"
+      # ✅ Set how many predictions per game (edit numbers as needed)
+      MARKOV_TARGETS_JSON: '{"SuperCash": 12, "Badger 5": 6, "Megabucks": 8}'
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install Python deps
-        shell: bash
         run: |
-          set -euo pipefail
           python -m pip install --upgrade pip
           pip install pandas numpy requests gspread google-auth openai
 
-      - name: Diagnostics (what are we about to run?)
-        shell: bash
+      - name: Write Google creds to file
         run: |
-          set -euo pipefail
-          echo "=== Commit ==="
-          git rev-parse HEAD
-          echo "=== Files ==="
-          ls -la
-          echo "=== main.py stats (if present) ==="
-          if [[ -f main.py ]]; then
-            wc -l main.py || true
-            nl -ba main.py | sed -n '776,796p' || true
-          else
-            echo "main.py not found at repo root."
-          fi
-          echo "=== Python files ==="
-          find . -name "*.py" -print | sort
+          printf '%s' "$GOOGLE_CREDS_JSON" > creds.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$PWD/creds.json" >> "$GITHUB_ENV"
 
-      - name: Preflight (secrets present?)
-        shell: bash
+      - name: Preflight
         run: |
           set -euo pipefail
           req=(GOOGLE_CREDS_JSON RAPID_API_KEY)
           if [[ "${ENABLE_LLM_METHOD:-0}" == "1" ]]; then
             req+=(OPENAI_API_KEY)
           fi
-
           fail=0
           for v in "${req[@]}"; do
             val="${!v:-}"
@@ -71,34 +54,25 @@ jobs:
               echo "$v is set"
             fi
           done
-
           if [[ $fail -ne 0 ]]; then
             echo "Preflight failed due to missing secrets."
             exit 1
           fi
 
-      - name: Optional: write GOOGLE_APPLICATION_CREDENTIALS (for libs that expect a file)
-        shell: bash
+      - name: Diagnostic – show Markov targets
         run: |
-          set -euo pipefail
-          if [[ -n "${GOOGLE_CREDS_JSON:-}" ]]; then
-            printf '%s' "$GOOGLE_CREDS_JSON" > creds.json
-            echo "GOOGLE_APPLICATION_CREDENTIALS=$PWD/creds.json" >> "$GITHUB_ENV"
-            echo "Wrote creds.json and exported GOOGLE_APPLICATION_CREDENTIALS"
-          else
-            echo "GOOGLE_CREDS_JSON not set; skipping file write"
-          fi
+          python - <<'PY'
+          import os, json
+          raw = os.getenv("MARKOV_TARGETS_JSON","")
+          try:
+              targets = json.loads(raw) if raw.strip() else {}
+          except Exception:
+              targets = {}
+          print("Resolved MARKOV targets:", targets)
+          PY
 
-      # Compile all first so you fail before running if there's a syntax issue
-      - name: Syntax check all Python
-        shell: bash
-        run: |
-          set -euo pipefail
-          find . -name "*.py" -print0 | xargs -0 python -m py_compile
-          echo "All Python files compiled successfully."
+      - name: Run main predictor
+        run: python main.py
 
-      - name: Run predictor
-        shell: bash
-        run: |
-          set -euo pipefail
-          python main.py
+      - name: Run Markov predictor
+        run: python markov_predictor.py
