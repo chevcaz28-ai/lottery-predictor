@@ -3,43 +3,57 @@ name: Run Lottery Predictor
 on:
   workflow_dispatch:
   schedule:
-    - cron: "10 3 * * *"   # example
+    - cron: "10 3 * * *"   # 03:10 UTC
 
 jobs:
   run-script:
-    # If your secrets are stored in an Environment (e.g., "prod"), uncomment:
+    # If your secrets live in an Environment (e.g., "prod"), uncomment:
     # environment: prod
 
     runs-on: ubuntu-24.04
 
-    # 🔒 Map repo/env secrets into real environment variables for this job
+    # Map repo/env secrets into env vars used by your script & preflight
     env:
       GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
       RAPID_API_KEY:     ${{ secrets.RAPID_API_KEY }}
-      # Turn on only if you want to require OpenAI
-      ENABLE_LLM_METHOD: "0"
+      ENABLE_LLM_METHOD: "0"                 # set "1" only if you truly require OpenAI
       OPENAI_API_KEY:    ${{ secrets.OPENAI_API_KEY }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install Python deps
+        shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install pandas numpy requests gspread google-auth openai
 
-      # Optional but recommended: write the Google JSON to a file for libs that look for GOOGLE_APPLICATION_CREDENTIALS
-      - name: Write Google creds to file
+      - name: Diagnostics (what are we about to run?)
+        shell: bash
         run: |
-          printf '%s' "$GOOGLE_CREDS_JSON" > creds.json
-          echo "GOOGLE_APPLICATION_CREDENTIALS=$PWD/creds.json" >> "$GITHUB_ENV"
+          set -euo pipefail
+          echo "=== Commit ==="
+          git rev-parse HEAD
+          echo "=== Files ==="
+          ls -la
+          echo "=== main.py stats (if present) ==="
+          if [[ -f main.py ]]; then
+            wc -l main.py || true
+            nl -ba main.py | sed -n '776,796p' || true
+          else
+            echo "main.py not found at repo root."
+          fi
+          echo "=== Python files ==="
+          find . -name "*.py" -print | sort
 
-      # ✅ Preflight (correct parameter expansion & indirection)
-      - name: Preflight
+      - name: Preflight (secrets present?)
         shell: bash
         run: |
           set -euo pipefail
@@ -50,7 +64,7 @@ jobs:
 
           fail=0
           for v in "${req[@]}"; do
-            val="${!v:-}"     # indirection: read the value of the var named in $v
+            val="${!v:-}"
             if [[ -z "$val" ]]; then
               echo "::error title=Missing secret::$v is missing"; fail=1
             else
@@ -63,6 +77,28 @@ jobs:
             exit 1
           fi
 
-      - name: Run predictor
+      - name: Optional: write GOOGLE_APPLICATION_CREDENTIALS (for libs that expect a file)
+        shell: bash
         run: |
+          set -euo pipefail
+          if [[ -n "${GOOGLE_CREDS_JSON:-}" ]]; then
+            printf '%s' "$GOOGLE_CREDS_JSON" > creds.json
+            echo "GOOGLE_APPLICATION_CREDENTIALS=$PWD/creds.json" >> "$GITHUB_ENV"
+            echo "Wrote creds.json and exported GOOGLE_APPLICATION_CREDENTIALS"
+          else
+            echo "GOOGLE_CREDS_JSON not set; skipping file write"
+          fi
+
+      # Compile all first so you fail before running if there's a syntax issue
+      - name: Syntax check all Python
+        shell: bash
+        run: |
+          set -euo pipefail
+          find . -name "*.py" -print0 | xargs -0 python -m py_compile
+          echo "All Python files compiled successfully."
+
+      - name: Run predictor
+        shell: bash
+        run: |
+          set -euo pipefail
           python main.py
