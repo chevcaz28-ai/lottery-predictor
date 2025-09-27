@@ -1,0 +1,14 @@
+# Core HTTP
+requests>=2.31.0
+
+# Data wrangling
+pandas>=2.2.2
+numpy>=1.26.4
+pytz>=2024.1
+
+# Google Sheets (Service Account via gspread + google-auth)
+gspread>=6.1.2
+google-auth>=2.34.0
+
+# ML helpers (used by ml_model / markov)
+scikit-learn>=1.5.1
