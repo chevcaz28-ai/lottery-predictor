@@ -1,0 +1,125 @@
+name: Predictions (main then markov)
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 08:05 UTC = 03:05 America/Chicago during Daylight Saving Time (CDT).
+    # Adjust this to the nightly time you prefer in Chicago time, converting to UTC.
+    - cron: "5 8 * * *"
+
+concurrency:
+  group: predictions-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # ---- Required repository VARIABLES (Settings → Variables → Actions) ----
+      # e.g., SHEET_NAME="Lottery Predictor New August 25"
+      SHEET_NAME: ${{ vars.SHEET_NAME }}
+      LOCAL_TZ: ${{ vars.LOCAL_TZ }}
+      # Optional per-game counts for main.py (if your script reads them)
+      PRED_COUNT_POWERBALL: ${{ vars.PRED_COUNT_POWERBALL }}
+      PRED_COUNT_MEGABUCKS: ${{ vars.PRED_COUNT_MEGABUCKS }}
+      PRED_COUNT_SUPERCASH: ${{ vars.PRED_COUNT_SUPERCASH }}
+      PRED_COUNT_BADGER5: ${{ vars.PRED_COUNT_BADGER5 }}
+
+      # ---- Required repository SECRETS (Settings → Secrets and variables → Actions → Secrets) ----
+      GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
+      RAPID_API_KEY: ${{ secrets.RAPID_API_KEY }}
+      # Optional: only needed if you enable the LLM method in main.py
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      # ---- Markov tuning (override in repo Variables if you want) ----
+      MARKOV_METHOD_NAME: ${{ vars.MARKOV_METHOD_NAME || 'markov' }}
+      MARKOV_TEMP: ${{ vars.MARKOV_TEMP || '0.7' }}
+      MARKOV_SMOOTH: ${{ vars.MARKOV_SMOOTH || '1.0' }}
+      # Example: {"SuperCash":10,"Badger 5":5}
+      MARKOV_TARGETS_JSON: ${{ vars.MARKOV_TARGETS_JSON || '{"SuperCash":10,"Badger 5":5}' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          elif ls requirements*.txt >/dev/null 2>&1; then
+            pip install -r "$(ls requirements*.txt | head -n1)"
+          else
+            echo "No requirements file found; continuing."
+          fi
+
+      - name: Preflight checks (secrets & vars via jq)
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          req_env=(GOOGLE_CREDS_JSON RAPID_API_KEY SHEET_NAME LOCAL_TZ)
+          for v in "${req_env[@]}"; do
+            if [ -z "${!v:-}" ]; then
+              echo "::error::Missing required env/var: $v"
+              missing=1
+            fi
+          done
+
+          # Basic JSON sanity for GOOGLE_CREDS_JSON (must parse as JSON)
+          if ! echo "$GOOGLE_CREDS_JSON" | jq empty >/dev/null 2>&1; then
+            echo "::error::GOOGLE_CREDS_JSON is not valid JSON"
+            missing=1
+          fi
+
+          if [ "$missing" -ne 0 ]; then
+            echo "Preflight failed; aborting."
+            exit 1
+          fi
+          echo "Preflight OK."
+
+      - name: Compile check (optional)
+        run: |
+          python - <<'PY'
+import compileall, sys
+ok = compileall.compile_dir('.', force=True, quiet=1)
+sys.exit(0 if ok else 1)
+PY
+
+      - name: Run main predictions
+        env:
+          ENABLE_PREDICTIONS: "1"
+          ENABLE_BASELINE: "0"           # keep baseline from emitting as predictions
+          ENABLE_LLM_METHOD: ${{ vars.ENABLE_LLM_METHOD || '0' }}
+        run: |
+          set -euo pipefail
+          echo "Running main.py ..."
+          python main.py
+        # If main fails, don't run markov
+      
+      - name: Run Markov predictions
+        if: ${{ success() }}
+        env:
+          ENABLE_MARKOV_METHOD: "1"
+        run: |
+          set -euo pipefail
+          echo "Running markov_predictor.py ..."
+          # Ensure the script name is EXACTLY 'markov_predictor.py' in your repo
+          python markov_predictor.py
