@@ -110,7 +110,7 @@ jobs:
         env:
           ENABLE_PREDICTIONS: "1"
           ENABLE_BASELINE: "0"
-          ENABLE_LLM_METHOD: ${{ vars.ENABLE_LLM_METHOD || '0' }}
+          ENABLE_LLM_METHOD: ${{ vars.ENABLE_LLM_METHOD || '1' }}
           # Force only on manual runs when input force=true|1; otherwise 0
           FORCE_PREDICT_TODAY: ${{ (github.event_name == 'workflow_dispatch' && (inputs.force == 'true' || inputs.force == '1')) && '1' || '0' }}
         run: |
