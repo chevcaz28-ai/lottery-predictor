@@ -27,6 +27,8 @@ jobs:
   predict:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
+    # ---- Default env for ALL steps (you can still override per-step) ----
     env:
       # ---- Required repository VARIABLES (Settings → Variables → Actions) ----
       SHEET_NAME: ${{ vars.SHEET_NAME }}
@@ -44,12 +46,25 @@ jobs:
       RAPID_API_KEY: ${{ secrets.RAPID_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
-      # ---- Markov tuning (override in repo Variables if you want) ----
-      MARKOV_METHOD_NAME: ${{ vars.MARKOV_METHOD_NAME || 'markov' }}
-      MARKOV_TEMP: ${{ vars.MARKOV_TEMP || '0.7' }}
+      # ---- LLM integration (enable + model config) ----
+      ENABLE_LLM_METHOD: ${{ vars.ENABLE_LLM_METHOD || '1' }}
+      LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'openai' }}
+      LLM_MODEL: ${{ vars.LLM_MODEL || 'gpt-4o-mini' }}
+      LLM_TEMP: ${{ vars.LLM_TEMP || '0.9' }}
+
+      # ---- Baseline OFF so it can't drown out diversified picks ----
+      ENABLE_BASELINE: "0"
+
+      # ---- Markov tuning (diversity + stability) ----
+      MARKOV_METHOD_NAME: ${{ vars.MARKOV_METHOD_NAME || 'markov_mc' }}
+      MARKOV_TEMP: ${{ vars.MARKOV_TEMP || '1.05' }}
       MARKOV_SMOOTH: ${{ vars.MARKOV_SMOOTH || '1.0' }}
-      # Example: {"SuperCash":10,"Badger 5":5}
-      MARKOV_TARGETS_JSON: ${{ vars.MARKOV_TARGETS_JSON || '{"SuperCash":10,"Badger 5":5}' }}
+      MARKOV_RANDOM_SEED: ${{ vars.MARKOV_RANDOM_SEED || 'auto' }}
+      # Ensure all games are present; default includes Powerball:5 & Megabucks:10
+      MARKOV_TARGETS_JSON: ${{ vars.MARKOV_TARGETS_JSON || '{"SuperCash":10,"Badger 5":5,"Megabucks":10,"Powerball":5}' }}
+
+      # ---- Sheets/gspread resilience ----
+      GSPREAD_BACKOFF_MAX_SEC: ${{ vars.GSPREAD_BACKOFF_MAX_SEC || '20' }}
 
     steps:
       - name: Check out repository
@@ -77,7 +92,14 @@ jobs:
             pip install -r "$(ls requirements*.txt | head -n1)"
           else
             # Fallback: install the known deps directly
-            pip install               requests>=2.31.0               pandas>=2.2.2               numpy>=1.26.4               pytz>=2024.1               gspread>=6.1.2               google-auth>=2.34.0               scikit-learn>=1.5.1
+            pip install \
+              requests>=2.31.0 \
+              pandas>=2.2.2 \
+              numpy>=1.26.4 \
+              pytz>=2024.1 \
+              gspread>=6.1.2 \
+              google-auth>=2.34.0 \
+              scikit-learn>=1.5.1
           fi
 
       - name: Preflight checks (secrets & vars via jq)
@@ -109,8 +131,6 @@ jobs:
       - name: Run main predictions
         env:
           ENABLE_PREDICTIONS: "1"
-          ENABLE_BASELINE: "0"
-          ENABLE_LLM_METHOD: ${{ vars.ENABLE_LLM_METHOD || '1' }}
           # Force only on manual runs when input force=true|1; otherwise 0
           FORCE_PREDICT_TODAY: ${{ (github.event_name == 'workflow_dispatch' && (inputs.force == 'true' || inputs.force == '1')) && '1' || '0' }}
         run: |
