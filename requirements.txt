@@ -12,3 +12,4 @@ google-auth>=2.34.0
 
 # ML helpers (used by ml_model / markov)
 scikit-learn>=1.5.1
+openai>=1.40.0
