@@ -129,7 +129,10 @@ def _connect_sheet() -> Optional[gspread.Spreadsheet]:
 
     try:
         sa_info = json.loads(raw_creds)
-        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        scopes = [
+           "https://www.googleapis.com/auth/spreadsheets",
+           "https://www.googleapis.com/auth/drive",
+        ]
         creds = Credentials.from_service_account_info(sa_info, scopes=scopes)
         gc = gspread.authorize(creds)
         ss = gc.open(sheet_name)
