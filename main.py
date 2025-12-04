@@ -318,7 +318,7 @@ def mutate(nums: List[int], lo:int, hi:int) -> List[int]:
 
 def markov1_method(rows: List[List[Any]], need: int, lo: int, hi: int) -> List[int]:
     """
-    Build a simple first‑order Markov prediction based on historical draws.
+    Build a simple first-order Markov prediction based on historical draws.
     The old version collected candidates and then sorted them, which biased
     the result toward the smallest numbers.  Instead, we aggregate transition
     counts per candidate and choose the top 'need' numbers by frequency.
@@ -774,6 +774,7 @@ def load_best_methods(ss, game: str) -> Dict[str, float]:
         return {}
 
     return {k: v / total for k, v in best.items() if v > 0}
+
 # ---- LLM method (optional) ----
 def llm_pick_numbers(game:str, rows_hist: List[List[Any]]) -> Tuple[List[int], Optional[int]]:
     if os.getenv("ENABLE_LLM_METHOD","0").lower() not in ("1","true","yes"):
@@ -948,7 +949,7 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
     enabled_methods_count = 3 + (1 if os.getenv("ENABLE_BASELINE","1").lower() in ("1","true","yes") else 0)
     if os.getenv("ENABLE_LLM_METHOD","0").lower() in ("1","true","yes") and os.getenv("OPENAI_API_KEY","").strip():
         enabled_methods_count += 1
-    total_target = target_total_for_game(game, enabled_methods_count)
+    total_target = target_total_for_game(game, enabled_method_count=enabled_methods_count)
     remaining = max(0, total_target - len(existing_for_draw))
     if remaining == 0:
         print(f"[{game}] Already have {len(existing_for_draw)} predictions for draw={next_key}; target={total_target}. Skipping new emissions.")
@@ -989,7 +990,6 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
     # -----------------------------------------------------------------------------
 
 
-    # Base picks (one per enabled method)
     # Base picks (one per enabled method)
     methods: Dict[str, Tuple[List[int], Optional[int]]] = {}
 
@@ -1145,7 +1145,7 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
                 sp = base_sp.get(md, None)
                 if emit(md, variant, sp):
                     remaining -= 1
-# Final filler: random unique combos
+        # Final filler: random unique combos
         if remaining > 0:
             print(f"[{game}] activating final filler: need {remaining} more (draw={next_key})")
             def fresh_combo(need:int, lo:int, hi:int)->List[int]:
@@ -1253,36 +1253,30 @@ def main():
 
     force = os.getenv("FORCE_PREDICT_TODAY", "0").lower() in ("1","true","yes")
 
-# Emit new predictions ONLY when a new result arrived (or when forced),
-# and budget per (Game, NextDrawDate).
-for game_label, merged_rows, next_draw in results:
-    if not merged_rows:
-        continue
-
-    # latest draw date from the merged result history
-    latest_date = normalize_date(merged_rows[0][0])
-
-    rl = runlog.get(game_label, {"LastResultDate": "", "LastPredictedNextDraw": ""})
-    prev = normalize_date(rl.get("LastResultDate", ""))
-    is_new = (latest_date != prev)
-
-    print(
-        f"[{game_label}] latest_date={latest_date} prev={prev} "
-        f"is_new={is_new} force={force} "
-        f"next_draw={normalize_date(next_draw) or today_local_str()}"
-    )
-
-    if is_new or force:
-        if is_new:
-            # evaluate predictions against the newest result row
-            evaluate_pending_predictions(ss, game_label, merged_rows[0])
-            runlog[game_label] = {
-                "LastResultDate": latest_date,
-                "LastPredictedNextDraw": normalize_date(next_draw or "")
-            }
-
-        # generate new predictions using the full result history
-        write_predictions_for_game(ss, game_label, merged_rows, next_draw)
+    # Emit new predictions ONLY when a new result arrived (or when forced),
+    # and budget per (Game, NextDrawDate).
+    for game_label, merged_rows, next_draw in results:
+        if not merged_rows:
+            continue
+        # FIX: use merged_rows, not undefined rows_hist
+        latest_date = normalize_date(merged_rows[0][0])
+        rl = runlog.get(game_label, {"LastResultDate":"", "LastPredictedNextDraw":""})
+        prev = normalize_date(rl.get("LastResultDate",""))
+        is_new = (latest_date != prev)
+        print(
+            f"[{game_label}] latest_date={latest_date} prev={prev} "
+            f"is_new={is_new} force={force} "
+            f"next_draw={normalize_date(next_draw) or today_local_str()}"
+        )
+        if is_new or force:
+            if is_new:
+                evaluate_pending_predictions(ss, game_label, merged_rows[0])
+                runlog[game_label] = {
+                    "LastResultDate": latest_date,
+                    "LastPredictedNextDraw": normalize_date(next_draw or "")
+                }
+            # FIX: pass merged_rows into write_predictions_for_game
+            write_predictions_for_game(ss, game_label, merged_rows, next_draw)
 
     write_runlog(ss, runlog)
     print("Success! v4.5.1 finished. See Debug_Touch for this run’s timestamp.")
