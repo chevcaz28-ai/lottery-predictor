@@ -1253,24 +1253,36 @@ def main():
 
     force = os.getenv("FORCE_PREDICT_TODAY", "0").lower() in ("1","true","yes")
 
-    # Emit new predictions ONLY when a new result arrived (or when forced),
-    # and budget per (Game, NextDrawDate).
-    for game_label, merged_rows, next_draw in results:
-        if not merged_rows:
-            continue
-        latest_date = normalize_date(rows_hist[0][0])
-        rl = runlog.get(game_label, {"LastResultDate":"", "LastPredictedNextDraw":""})
-        prev = normalize_date(rl.get("LastResultDate",""))
-        is_new = (latest_date != prev)
-        print(f"[{game_label}] latest_date={latest_date} prev={prev} is_new={is_new} force={force} next_draw={normalize_date(next_draw) or today_local_str()}")
-        if is_new or force:
-            if is_new:
-                evaluate_pending_predictions(ss, game_label, merged_rows[0])
-                runlog[game_label] = {
-                    "LastResultDate": latest_date,
-                    "LastPredictedNextDraw": normalize_date(next_draw or "")
-                }
-            write_predictions_for_game(ss, game_label, rows_hist, next_draw)
+# Emit new predictions ONLY when a new result arrived (or when forced),
+# and budget per (Game, NextDrawDate).
+for game_label, merged_rows, next_draw in results:
+    if not merged_rows:
+        continue
+
+    # latest draw date from the merged result history
+    latest_date = normalize_date(merged_rows[0][0])
+
+    rl = runlog.get(game_label, {"LastResultDate": "", "LastPredictedNextDraw": ""})
+    prev = normalize_date(rl.get("LastResultDate", ""))
+    is_new = (latest_date != prev)
+
+    print(
+        f"[{game_label}] latest_date={latest_date} prev={prev} "
+        f"is_new={is_new} force={force} "
+        f"next_draw={normalize_date(next_draw) or today_local_str()}"
+    )
+
+    if is_new or force:
+        if is_new:
+            # evaluate predictions against the newest result row
+            evaluate_pending_predictions(ss, game_label, merged_rows[0])
+            runlog[game_label] = {
+                "LastResultDate": latest_date,
+                "LastPredictedNextDraw": normalize_date(next_draw or "")
+            }
+
+        # generate new predictions using the full result history
+        write_predictions_for_game(ss, game_label, merged_rows, next_draw)
 
     write_runlog(ss, runlog)
     print("Success! v4.5.1 finished. See Debug_Touch for this run’s timestamp.")
