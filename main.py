@@ -10,7 +10,7 @@ Key changes in 4.5.1:
 - Keeps: per-draw budgeting, Chicago-time timestamps, SHEET_ID targeting,
   diagnostics, merge & dedupe, adaptive weighting, optional LLM method, etc.
 """
-from predictor_core import markov_mc_method as seeded_markov_mc_method, freq_method, recency_method
+from predictor_core import freq_method, recency_method
 import os, json, datetime as dt, re, random, math
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1002,7 +1002,10 @@ def write_predictions_for_game(ss, game:str, rows_hist: List[List[Any]], next_dr
     methods["freq50"]  = (freq_method(rows_hist, need, lo, hi, window=50), None)
     methods["recency"] = (recency_method(rows_hist, need, lo, hi, decay=0.92), None)
     # Replace the simple markov1 method with a full Markov Monte Carlo method
-    methods["markov_mc"] = (seeded_markov_mc_method(rows_hist, need, lo, hi, MARKOV_TEMP, MARKOV_SMOOTH, seed_mode="auto"), None)
+    methods["markov_mc"] = (
+    markov_mc_method(rows_hist, need, lo, hi, MARKOV_TEMP, MARKOV_SMOOTH),
+    None,
+)
 
     # drop disabled methods
     for _m in list(methods.keys()):
