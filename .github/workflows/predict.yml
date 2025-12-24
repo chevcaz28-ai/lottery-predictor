@@ -46,7 +46,7 @@ jobs:
       METHOD_WEIGHTING_MIN_ROWS: "40"           # minimum evaluated rows required to enable weighting
       METHOD_WEIGHTING_BLEND_ALPHA: "0.35"      # 0=uniform, 1=fully learned (recommend <=0.5)
       METHOD_WEIGHTING_CAP_RATIO: "2.0"         # prevents one method dominating
-      METHOD_WEIGHTING_WIN_BONUS: "5.0"         # adds extra weight for wins (usually 0)
+      METHOD_WEIGHTING_WIN_BONUS: "0"         # adds extra weight for wins (usually 0)
 
 
       # Prediction counts
