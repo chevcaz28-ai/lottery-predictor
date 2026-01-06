@@ -27,7 +27,8 @@ jobs:
 
       # Core toggles
       ENABLE_PREDICTIONS: "1"
-      ENABLE_BASELINE: "0"
+      ENABLE_BASELINE: "1"
+      DISABLE_METHODS:  last_draw_baseline
       ENABLE_LLM_METHOD: "1"
 
       # LLM (main.py expects OPENAI_MODEL)
