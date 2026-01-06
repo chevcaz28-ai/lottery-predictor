@@ -1,0 +1,152 @@
+name: predict
+
+"on":
+  schedule:
+    # Daily at 05:15 America/Chicago (11:15 UTC during standard time; 10:15 UTC during daylight time)
+    - cron: "15 11 * * *"
+  workflow_dispatch:
+    inputs:
+      force_predict_today:
+        description: "Force prediction even if no new draw detected (0/1)"
+        required: false
+        default: "0"
+      run_backtest:
+        description: "Run backtest logic if implemented (0/1)"
+        required: false
+        default: "0"
+      write_backtest:
+        description: "Write backtest outputs if implemented (0/1)"
+        required: false
+        default: "0"
+
+permissions:
+  contents: read
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          elif ls requirements*.txt >/dev/null 2>&1; then
+            pip install -r "$(ls requirements*.txt | head -n1)"
+          else
+            pip install \
+              "requests>=2.31.0" \
+              "pandas>=2.2.2" \
+              "numpy>=1.26.4" \
+              "pytz>=2024.1" \
+              "gspread>=6.1.2" \
+              "google-auth>=2.34.0" \
+              "scikit-learn>=1.5.1" \
+              "openai>=1.40.0"
+          fi
+
+      - name: Preflight env
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          req_env=(GOOGLE_CREDS_JSON RAPID_API_KEY SHEET_NAME LOCAL_TZ)
+          for v in "${req_env[@]}"; do
+            if [ -z "${!v:-}" ]; then
+              echo "::error::Missing required env/var: $v"
+              missing=1
+            fi
+          done
+
+          # Validate GOOGLE_CREDS_JSON is valid JSON
+          if ! echo "$GOOGLE_CREDS_JSON" | python -c "import json,sys; json.load(sys.stdin)"; then
+            echo "::error::GOOGLE_CREDS_JSON is not valid JSON"
+            missing=1
+          fi
+
+          if [ "$missing" -ne 0 ]; then
+            echo "Preflight failed; aborting."
+            exit 1
+          fi
+          echo "Preflight OK."
+
+      - name: Compile Python
+        shell: bash
+        run: |
+          python -c "import compileall, sys; sys.exit(0 if compileall.compile_dir('.', force=True, quiet=1) else 1)"
+
+      - name: Run predictor
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Running main.py ..."
+          echo "FORCE_PREDICT_TODAY=$FORCE_PREDICT_TODAY"
+          echo "PREDICTIONS_PER_GAME=${PREDICTIONS_PER_GAME:-''}"
+          echo "Per-game overrides: PB=${PREDICTIONS_POWERBALL:-''}, MB=${PREDICTIONS_MEGABUCKS:-''}, SC=${PREDICTIONS_SUPERCASH:-''}, B5=${PREDICTIONS_BADGER5:-''}"
+          echo "DISABLE_METHODS=${DISABLE_METHODS:-''}"
+          python main.py
+        env:
+          # Required
+          GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
+          RAPID_API_KEY: ${{ secrets.RAPID_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SHEET_NAME: ${{ vars.SHEET_NAME || 'Lottery Predictor New August 25' }}
+          LOCAL_TZ: ${{ vars.LOCAL_TZ || 'America/Chicago' }}
+
+          # Behavior toggles
+          FORCE_PREDICT_TODAY: ${{ github.event.inputs.force_predict_today || '0' }}
+          ENABLE_PREDICTIONS: "1"
+
+          # Enable non-LLM methods (freq/recency/markov) AND LLM method.
+          ENABLE_BASELINE: "1"
+          ENABLE_LLM_METHOD: "1"
+
+          # Ensure "last draw baseline" never appears in predictions.
+          # (If your main.py already filters it, this is still harmless.)
+          DISABLE_METHODS: "last_draw_baseline"
+
+          # Model config
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-4o-mini' }}
+          LLM_TEMP: ${{ vars.LLM_TEMP || '0.9' }}
+          MARKOV_TEMP: ${{ vars.MARKOV_TEMP || '1.2' }}
+          MARKOV_SMOOTH: ${{ vars.MARKOV_SMOOTH || '1.0' }}
+          MARKOV_RANDOM_SEED: ${{ vars.MARKOV_RANDOM_SEED || '123' }}
+
+          # Optional method weighting
+          ENABLE_METHOD_WEIGHTING: ${{ vars.ENABLE_METHOD_WEIGHTING || '0' }}
+          METHOD_WEIGHTING_LOOKBACK_ROWS: ${{ vars.METHOD_WEIGHTING_LOOKBACK_ROWS || '400' }}
+          METHOD_WEIGHTING_MIN_ROWS: ${{ vars.METHOD_WEIGHTING_MIN_ROWS || '40' }}
+          METHOD_WEIGHTING_BLEND_ALPHA: ${{ vars.METHOD_WEIGHTING_BLEND_ALPHA || '0.35' }}
+          METHOD_WEIGHTING_CAP_RATIO: ${{ vars.METHOD_WEIGHTING_CAP_RATIO || '2.0' }}
+          METHOD_WEIGHTING_WIN_BONUS: ${{ vars.METHOD_WEIGHTING_WIN_BONUS || '2.0' }}
+
+          # Prediction counts
+          PREDICTIONS_PER_GAME: ${{ vars.PREDICTIONS_PER_GAME || '10' }}
+          PREDICTIONS_POWERBALL: ${{ vars.PREDICTIONS_POWERBALL || '5' }}
+          PREDICTIONS_MEGABUCKS: ${{ vars.PREDICTIONS_MEGABUCKS || '10' }}
+          PREDICTIONS_SUPERCASH: ${{ vars.PREDICTIONS_SUPERCASH || '10' }}
+          PREDICTIONS_BADGER5: ${{ vars.PREDICTIONS_BADGER5 || '5' }}
+
+          # Backtest flags (only if your main.py defines it)
+          RUN_BACKTEST: ${{ github.event.inputs.run_backtest || '0' }}
+          WRITE_BACKTEST: ${{ github.event.inputs.write_backtest || '0' }}
+
+          # API/Sheets backoff
+          GSPREAD_BACKOFF_MAX_SEC: ${{ vars.GSPREAD_BACKOFF_MAX_SEC || '20' }}
