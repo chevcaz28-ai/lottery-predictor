@@ -1,0 +1,155 @@
+name: predict
+
+on:
+  schedule:
+    # Daily at 05:15 America/Chicago (11:15 UTC during standard time; 10:15 UTC during daylight time)
+    - cron: "15 11 * * *"
+  workflow_dispatch:
+    inputs:
+      sheet_name:
+        description: "Google Sheet name (optional; overrides repo variable SHEET_NAME)"
+        required: false
+        default: ""
+      force_predict_today:
+        description: "Force prediction even if no new draw detected (0/1)"
+        required: false
+        default: "0"
+      predictions_per_game:
+        description: "How many predictions per game (optional)"
+        required: false
+        default: ""
+      run_backtest:
+        description: "Run backtest logic if implemented (0/1)"
+        required: false
+        default: "0"
+      write_backtest:
+        description: "Write backtest outputs if implemented (0/1)"
+        required: false
+        default: "0"
+
+permissions:
+  contents: read
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+
+    # Centralize env so *all* steps (including preflight) see them.
+    env:
+      # Required
+      GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
+      RAPID_API_KEY: ${{ secrets.RAPID_API_KEY }}
+      SHEET_NAME: ${{ github.event.inputs.sheet_name || vars.SHEET_NAME }}
+      LOCAL_TZ: ${{ vars.LOCAL_TZ || 'America/Chicago' }}
+
+      # Optional (only used if you enable LLM predictions in main.py)
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      # Behavior flags (safe defaults)
+      FORCE_PREDICT_TODAY: ${{ github.event.inputs.force_predict_today || '0' }}
+      RUN_BACKTEST: ${{ github.event.inputs.run_backtest || '0' }}
+      WRITE_BACKTEST: ${{ github.event.inputs.write_backtest || '0' }}
+
+      # Optional override
+      PREDICTIONS_PER_GAME: ${{ github.event.inputs.predictions_per_game || '' }}
+
+      # Key controls
+      ENABLE_LLM_METHOD: "1"
+      ENABLE_BASELINE: "0"            # Baseline adds no value for play; keep it off.
+      ENABLE_MARKOV_EXPERIMENTAL: "1" # Non-LLM method
+      ENABLE_MARKOV_CONSERVATIVE: "1" # Non-LLM method
+
+      # Hard-disable the last-draw baseline method even if code paths change.
+      DISABLE_METHODS: "last_draw_baseline"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          elif ls requirements*.txt >/dev/null 2>&1; then
+            pip install -r "$(ls requirements*.txt | head -n1)"
+          else
+            pip install               "requests>=2.31.0"               "pandas>=2.2.2"               "numpy>=1.26.4"               "pytz>=2024.1"               "gspread>=6.1.2"               "google-auth>=2.34.0"               "scikit-learn>=1.5.1"               "openai>=1.40.0"
+          fi
+
+      - name: Preflight (validate env + creds)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, sys
+
+          required = ["GOOGLE_CREDS_JSON", "RAPID_API_KEY", "SHEET_NAME", "LOCAL_TZ"]
+          missing = [k for k in required if not os.getenv(k)]
+          if missing:
+              for k in missing:
+                  print(f"::error::Missing required secret/variable: {k}")
+              print(
+                  "Fix: Repository Settings → Secrets and variables → Actions.
+"
+                  "- Secrets: GOOGLE_CREDS_JSON, RAPID_API_KEY (and OPENAI_API_KEY if using LLM)
+"
+                  "- Variables: SHEET_NAME (and optionally LOCAL_TZ)
+"
+              )
+              sys.exit(1)
+
+          # Validate GOOGLE_CREDS_JSON is valid JSON and looks like a service account.
+          try:
+              creds = json.loads(os.environ["GOOGLE_CREDS_JSON"])
+          except Exception as e:
+              print(f"::error::GOOGLE_CREDS_JSON is not valid JSON: {e}")
+              sys.exit(1)
+
+          for key in ("client_email", "private_key"):
+              if key not in creds:
+                  print(f"::error::GOOGLE_CREDS_JSON missing key: {key}")
+                  sys.exit(1)
+
+          # Guardrail: ensure last-draw baseline is disabled.
+          if "last_draw_baseline" not in (os.getenv("DISABLE_METHODS") or "").split(","):
+              print("::warning::DISABLE_METHODS does not include last_draw_baseline (adding is recommended).")
+
+          print("Preflight OK.")
+          PY
+
+      - name: Compile check (quick sanity)
+        run: python -m compileall -q .
+
+      - name: Run predictor
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Running main.py ..."
+          python main.py
+
+      - name: Upload logs (if present)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-logs
+          path: |
+            *.log
+            **/*.log
+            runlog*.json
+          if-no-files-found: ignore
